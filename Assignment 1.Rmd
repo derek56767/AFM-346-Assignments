@@ -1,0 +1,298 @@
+---
+title: "Assignment 1"
+author: "Derek Shat"
+date: "9/20/2021"
+output: 
+  html_document:
+    theme: "darkly"
+    toc: true
+    toc_float:  
+      collapsed: false
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+Gapminder is described in the [R Documentation](https://www.rdocumentation.org/packages/gapminder/versions/0.3.0/topics/gapminder) as "Excerpt of the Gapminder data on life expectancy, GDP per capita, and population by country". It is a data frame containing 1704 rows and 6 variables: country, continent, year, life expectancy, population, and inflation-adjusted GDP per capita (in US dollars). There are 142 countries in the data, with data listed from 1952 to 2007 in increments of 5 years.
+
+```{r load_libraries_data}
+# Load libraries
+library(tidyverse)
+library(knitr)
+
+# Data
+library(gapminder) # no functions, only data
+data(gapminder)
+```
+
+# Variable Description
+
+The identifiers in the data are the country, continent, and year variables. The metrics are life expectancy, population, and GDP per capita.
+
+## Identifiers
+
+```{r identifiers_count}
+gapminder %>% 
+  summarise(countries = n_distinct(country), 
+            continents = n_distinct(continent),
+            years = n_distinct(year)) %>% 
+  kable() 
+```
+
+The unique number of countries, continents, and years are 142, 5, and 12 respectively. The code below shows what these unique values are.
+
+```{r unique_identifiers}
+unique(gapminder$country) #unique countries
+unique(gapminder$continent) #unique continents
+unique(gapminder$year) #unique years
+```
+
+```{r missing_values}
+summary(gapminder %>% is.na()) #for missing (NA) values in general over the dataframe
+#For missing or NaN values in the metrics
+summary(gapminder$lifeExp %>% is.nan())
+summary(gapminder$pop %>% is.nan())
+summary(gapminder$gdpPercap %>% is.nan())
+```
+
+There are no missing values for any of the identifiers or metrics and none of them display NA or NaN values.
+
+Identifiers should be analyzed as a group since they are interconnected and are related to each other. There is no observation without both the country and year. It could also be beneficial to analyze metrics between continents over the years by taking all of the observations and colouring them by continent to look for points of comparison such as growth over time.
+
+## Metrics
+
+### Life Expectation
+
+```{r lifeExp_calculations}
+gapminder %>%
+  summarise(min_lifeExp = min(lifeExp),
+            q1_lifeExp = quantile(lifeExp,0.25),
+            median_lifeExp = median(lifeExp),
+            mean_lifeExp = mean(lifeExp),
+            q3_lifeExp = quantile(lifeExp,0.75),
+            max_lifeExp = max(lifeExp),
+            sd_lifeExp = sd(lifeExp),
+            IQR_lifeExp = IQR(lifeExp)) %>% 
+  kable()
+```
+
+```{r lifeExp_byContinent_calculations}
+gapminder %>% 
+  group_by(continent) %>% 
+  summarise(min_lifeExp = min(lifeExp),
+            q1_lifeExp = quantile(lifeExp,0.25),
+            median_lifeExp = median(lifeExp),
+            mean_lifeExp = mean(lifeExp),
+            q3_lifeExp = quantile(lifeExp,0.75),
+            max_lifeExp = max(lifeExp),
+            sd_lifeExp = sd(lifeExp),
+            IQR_lifeExp = IQR(lifeExp)) %>% 
+  kable()
+```
+
+There are several outliers when looking at each continent's values. Africa has at least one outlier as maximum value since it lies above Q3 + 1.5\*IQR, while Americas and Europe have outliers for their minimum values since they lie below Q1 - 1.5\*IQR.
+
+```{r lifeExp_hist}
+gapminder %>% ggplot(aes(x = lifeExp, fill =..count..)) +
+  scale_x_continuous(breaks = seq(0,100,10))+
+  geom_histogram(breaks=c(20,30,40,50,60,70,80,90)) +
+  labs(title = 'Frequency of Life Expectancy in years from 1952-2007', 
+       x = 'Life Expectancy (years)')
+```
+
+```{r lifeExp_box}
+gapminder %>%
+  ggplot(aes(x = lifeExp, y = as_factor(year))) + 
+  geom_boxplot() + 
+  labs(title = 'Life Expectation Distribution', 
+       x = 'Life Expectation', 
+       y = 'Year') +
+  facet_wrap(~continent, nrow = 2) +
+  theme(axis.text.x = element_text(angle = 90))
+```
+
+All continents show a general trend of life expectation increasing upward, although to different degrees. Africa's median life expectancy has stagnated since around 1982 and its interquartile range has increased over time. America's interquartile range has decreased over time while life expectancy growth has slowed. In Asia and Europe, aside for some outliers on the lower end, life expectancy has mostly grown at the same rate, while Oceania's life expectancy increase by larger amounts as time goes on.
+
+### Population
+
+```{r pop_calculations}
+gapminder %>% 
+  summarise(min_pop = min(pop),
+            q1_pop = quantile(pop,0.25),
+            median_pop = median(pop),
+            mean_pop = mean(pop),
+            q3_pop = quantile(pop,0.75),
+            max_pop = max(pop),
+            sd_pop = sd(pop),
+            IQR_pop = IQR(pop)) %>% 
+  kable()
+```
+
+```{r pop_byContinent_calculations}
+gapminder %>% 
+  group_by(continent) %>% 
+  summarise(min_pop = min(pop),
+            q1_pop = quantile(pop,0.25),
+            median_pop = median(pop),
+            mean_pop = mean(pop),
+            q3_pop = quantile(pop,0.75),
+            max_pop = max(pop),
+            sd_pop = sd(pop),
+            IQR_pop = IQR(pop)) %>% 
+  kable()
+```
+
+There are also some outliers here. Africa, Americas, Asia, and Europe each have at least one outlier in the form of their maxes.
+
+```{r pop_hist}
+options(scipen=999)
+gapminder %>% ggplot(aes(x = pop, fill =..count..)) +
+  geom_histogram(binwidth=10000000) +
+  labs(title = 'Frequency of Population in years from 1952-2007', 
+       x = 'Population')
+```
+
+```{r pop_box}
+options(scipen=999)
+gapminder %>%
+  ggplot(aes(x = pop, y = as_factor(year))) + 
+  geom_boxplot() + 
+  labs(title = 'Population Distribution', 
+       x = 'Population', 
+       y = 'Year') +
+  facet_wrap(~continent, nrow = 2,scales="free_x") +
+  theme(axis.text.x = element_text(angle = 90))
+```
+
+Since the outliers make it harder to discern trends for Americas and Asia, they will be taken out, and there will be separate graphs for just Asia as well as Africa, Americas, and Europe.
+
+```{r pop_box_2}
+options(scipen=999)
+gapminder %>%
+  filter(continent == "Asia") %>% 
+  ggplot(aes(x = pop, y = as_factor(year))) + 
+  geom_boxplot(outlier.shape=NA)+
+  coord_cartesian(xlim = c(0,150000000)) + 
+  labs(title = 'Population Distribution', 
+       x = 'Population', 
+       y = 'Year') +
+  facet_wrap(~continent, nrow = 2) +
+  theme(axis.text.x = element_text(angle = 90))
+
+gapminder %>%
+  filter(continent == "Africa" | continent == "Americas" | continent == "Europe") %>% 
+  ggplot(aes(x = pop, y = as_factor(year))) + 
+  geom_boxplot(outlier.shape=NA)+
+  coord_cartesian(xlim = c(0,45000000)) + 
+  labs(title = 'Population Distribution', 
+       x = 'Population', 
+       y = 'Year') +
+  facet_wrap(~continent, nrow = 2) +
+  theme(axis.text.x = element_text(angle = 90))
+  
+```
+
+All continents show an upward trend in population, except Europe (including its outliers), which seems to stay mostly the same throughout the 55 years. Africa, Americas, and Asia's first quartile and median population grow by small amounts, although the third quartile seems to grow by relatively larger amounts. In Oceania, all three quartiles seem to be growing at faster rates than the other continents.
+
+### GDP per capita
+
+```{r gdpPercap_calculations}
+gapminder %>% 
+  summarise(min_gdpPercap = min(gdpPercap),
+            q1_lgdpPercap = quantile(gdpPercap,0.25),
+            median_gdpPercap = median(gdpPercap),
+            mean_gdpPercap = mean(gdpPercap),
+            q3_gdpPercap = quantile(gdpPercap,0.75),
+            max_gdpPercap = max(gdpPercap),
+            sd_gdpPercap = sd(gdpPercap),
+            IQR_gdpPercap = IQR(gdpPercap)) %>% 
+  kable()
+```
+
+```{r gdpPercap_byContinent_calculations}
+gapminder %>% 
+  group_by(continent) %>% 
+  summarise(min_gdpPercap = min(gdpPercap),
+            q1_gdpPercap = quantile(gdpPercap,0.25),
+            median_gdpPercap = median(gdpPercap),
+            mean_gdpPercap = mean(gdpPercap),
+            q3_gdpPercap = quantile(gdpPercap,0.75),
+            max_gdpPercap = max(gdpPercap),
+            sd_gdpPercap = sd(gdpPercap),
+            IQR_gdpPercap = IQR(gdpPercap)) %>% 
+  kable()
+```
+
+There are outliers here yet again. Each continent has outliers in the form of their maxes once again.
+
+```{r gdpPercap_hist}
+options(scipen=999)
+gapminder %>% ggplot(aes(x = gdpPercap, fill =..count..)) +
+  scale_x_continuous(breaks = seq(0,120000,10000))+
+  geom_histogram(breaks = c(0,10000,20000,30000,40000,50000,60000,70000,80000,90000,100000,110000,120000)) +
+  labs(title = 'Frequency of GDP per capita (US$) in years from 1952-2007', 
+       x = 'GDP per capita')
+```
+
+```{r gdpPercap_box}
+gapminder %>%
+  ggplot(aes(x = gdpPercap, y = as_factor(year))) + 
+  geom_boxplot() + 
+  labs(title = 'GDP per Capita Distribution', 
+       x = 'GDP per Capita', 
+       y = 'Year') +
+  facet_wrap(~continent, nrow = 2,scales="free_x") +
+  theme(axis.text.x = element_text(angle = 90))
+```
+
+For an alternate view that takes out outliers and focuses on Africa and Americas' data since the other 3 are easier to see in the previous graphs...
+
+```{r gdpPercap_box_2}
+gapminder %>%
+  filter(continent == "Africa" | continent == "Americas") %>% 
+  ggplot(aes(x = gdpPercap, y = as_factor(year))) + 
+  geom_boxplot(outlier.shape = NA) +
+  coord_cartesian(xlim = c(0,15000)) +
+  labs(title = 'GDP per Capita Distribution', 
+       x = 'GDP per Capita', 
+       y = 'Year') +
+  facet_wrap(~continent, nrow = 2) +
+  theme(axis.text.x = element_text(angle = 90))
+```
+
+In all continents, the upper whisker seems to get larger with every passing year. However, outside of Europe and Oceania, the median GDP per capita does not change very much. in Europe and Oceania all three quartiles and upper whisker seem to grow with each passing year (except for Europe post-1992 likely due to Soviet dissolution).
+
+# Relationship between Life Expectancy and GDP per Capita
+
+The linear correlation between life expectancy and GDP per capita:
+
+```{r correlation}
+cor(gapminder$lifeExp,gapminder$gdpPercap)
+```
+
+This correlation number states that life expectancy can explain 58.4% of GDP per capita, although this is not necessarily true as correlation is not causation.
+
+```{r relationship_scatter}
+gapminder %>%
+  ggplot(aes(x = lifeExp, y = gdpPercap, color = continent)) + 
+  geom_point() +
+  coord_cartesian()+
+  labs(title = 'Life Expectancy and GDP per Capita', 
+       x = 'Life Expectancy', 
+       y = 'GDP per Capita') +
+  facet_wrap(~year, nrow = 3,scales="free_y") +
+  theme(legend.position='bottom') 
+```
+
+The graphs depict that, as life expectancy increases, GDP per capita exponentially increases, especially after life expectancy exceeds 70. Alternatively, the graphs also depict that increases in GDP per capita result in minor increases in life expectancy. This seems to be the case for most countries, with the exception a single Asian country from 1952-1982 and few African countries in 2002 and 2007. From a logic standpoint, life expectancy does not necessarily affect a country's GDP per capita; it seems more likely to be the other way around. However, considering that there was only a 58.4% correlation between the two, there are likely many other factors that help explain these variables more accurately. This especially seems to be the case when comparing 1952 and 2007: the lowest life expectancy has basically doubled despite having around the same GDP per capita on average.
+
+# Conclusion
+
+From this analysis, some questions to be asked are:
+
+1.  Are there any correlations between variables that seem to be stronger?
+2.  What metrics not in the Gapminder dataset seem likely to help explain the current metrics better?
+3.  Are there any major world events that may have affected the metrics in drastic ways? (e.g. Soviet dissolution on GDP per capita, changes in government)

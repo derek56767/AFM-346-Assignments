@@ -1,0 +1,206 @@
+---
+title: "AFM 346 Final Project - Report"
+author: "Derek Shat"
+date: "12/15/2021"
+output: 
+  html_document:
+    theme: "darkly"
+    toc: true
+    toc_float:  
+      collapsed: false
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+# Introduction
+
+  The goal of this report is to predict credit card defaults based on many different variables in a data set published by Yeh and Lien (2009). The data set contains 30,000 rows with variables describing characteristics such as sex, education, marital status and age, and amounts such as credit card limits and credit card balances, repayments, and repayment statuses that go back up to 6 months. From this data I will recommend two recommended models: one low-complexity model and one top-performing model.
+  
+  The methodology section will explain why the models were selected, what went into creating the models and how they will be evaluated. The data section will show an overall summary of each variable in the data and their correlations with each other. There will be a section for each model that shows how they are created and trained. Afterwards the models will be tested performance before coming to the conclusion, where a model will be recommended.
+  
+  In the end, there are no recommended models. Although the logistic regression and single layer neural net models obtain somewhat favourable results during training, the models do extremely poorly when tested, as indicated in some of the alternate metrics measured. When going from training to testing data, the  
+  
+
+```{r library_setup, message=FALSE}
+library(tidyverse) 
+library(readxl)
+library(tidymodels)
+library(GGally)
+library(knitr)
+library(doParallel)
+library(tictoc)
+library(janitor)
+```
+
+# Methodology 
+
+  The models in this report were chosen as they fulfilled the characteristics of low-complexity and top-performing. Logistic regression is a model that only has two hyperparameters and is easier to explain compared to neural network, which is harder to explain overall and can have three hyperparameters. Although boosted tree was originally chosen to be the top-performing model, neural network seemed to outperform it so it was replaced accordingly. 
+  
+  To tune the hyperparameters, a latin hypercube was used to test a desired number of random hyperparameter combinations. This would avoid needing to test an increasingly large number of combinations that a regular grid would have when there are many different hyperparameters.
+  
+  The performance metric I will be optimizing for is kappa, which will tell accuracy of the model when it is adjusted by randomness. This lack of randomness is preferable as it will be more accurate at telling performance of the models compared to accuracy. I will also incorporate analysis of other metrics such as F-measure, ROC AUC, and Log Loss in my recommendation to ensure my conclusion is supported by the other metrics.
+  
+  To train the models, 70% of the data set will be allocated for training and 30% will be allocated for testing. When splitting up the data in this manner, there will be an equal proportion of rows containing defaults. Cross-validation will be used with 5 folds and 5 repeats for a total of 25 sets to train the model on.
+  
+  In the models, feature engineering is used to create new variables that represent the proportion of the bill that was paid. As there were variables representing repayments and total credit card balances going back 6 months, there are also 6 variables to represent the proportion paid. Aside from one step to turn categorical variables in the data set into dummy variables, the other steps in the recipes used were to transform the data.
+
+
+```{r data_cleanup}
+credit_raw <- read_xls("default of credit card clients.xls", skip = 1)
+
+credit_dt <- credit_raw %>%
+  clean_names() %>%
+        select(default = default_payment_next_month,
+               everything()) %>% 
+  mutate(across(.cols = c('default','sex', 
+                          'education', 'marriage',
+                          matches('pay_[0-9]')), 
+                as_factor))
+
+set.seed(123)
+credit_split <- initial_split(credit_dt, prop = 0.7, strata = default)
+credit_train <- training(credit_split)
+credit_test <- testing(credit_split)
+set.seed(456)
+credit_folds <- credit_train %>%
+  vfold_cv(v = 5, repeats = 5, strata = default)
+
+perf_meas <- metric_set(kap,f_meas,roc_auc,mn_log_loss)
+
+```
+
+
+# Data
+
+  As stated in the introduction, the data set contains 30,000 rows. There are columns rows for variables, some categorical, and some numeric. 
+  The categorical variables are sex, education, marriage, and pay_x where x takes the values of 0,2,3,4,5 and 6. Sex takes the values of 1(male) and 2(female). Education takes the values of 1(grad school), 2(university), 3(high school), 4(other), and 5 and 6 (unknown). Marriage takes the values of 1(married), 2(single), and 3(other). For pay_x, which represents payment status from September 2005 (pay_0) and goes back to April 2005 (pay_6), -1 represents payment on time and 1-8 represent the number of months payment has been delayed, and 9 represents 9 or more months. The numeric variables are limit_bal(credit card limit), age, bill_amt_x, and pay_amtx, where x takes the values of 1 to 6 and have the same function as in pay_x (0 is replaced by 1 in these instances). 
+
+## Exploratory Data Analysis
+
+```{r EDA, message = FALSE, fig.width=12, fig.height=12}
+# cannot get correlation for default as a factor
+ggpairs(credit_raw %>%
+          clean_names() %>%
+          select(default = default_payment_next_month, everything()) %>% 
+          select(-c("id","sex","education","marriage", matches('pay_[0-9]'))))+ 
+  theme_minimal() + 
+  labs(title = 'Exploratory Data Analysis',
+       subtitle = 'Default of Credit Card Clients')
+```
+  
+  From this pair plot, we can see the correlation that each variable has with each other. Default does not seem to have strong correlations with any of the variables, with credit card limit having the highest (although negative) correlation at -0.154. This can be interpreted as high credit card limits resulting in a slightly lower chance of default, although this observation is not absolute. All of the bill amounts have high correlations with each other, mostly because the amount in the bill statement probably does not drastically change from month to month. The payment amounts have weak correlations with each other, meaning that payment amounts vary quite a bit from month to month on average.
+
+## Descriptive Stats
+
+```{r descriptive_stats}
+credit_dt %>%
+  select(-c("default","id","sex","education","marriage", matches('pay_[0-9]'))) %>%
+  rownames_to_column('id') %>%
+  pivot_longer(-id) %>%
+  group_by(name) %>%
+  summarise(min = min(value), 
+            q25 = quantile(value,0.25),
+            med = median(value),
+            avg = mean(value),
+            q75 = quantile(value, 0.75),
+            max = max(value),
+            IQR = IQR(value),
+            sd = sd(value),
+            na = sum(is.na(value))) %>%
+  kable(digits=2)
+
+credit_dt %>% 
+  select("default","sex","education","marriage", matches('pay_[0-9]')) %>%
+  summary() %>% kable()
+
+```
+
+  For the numeric values outside of age, it seems there is a lot of deviation in the data, with the median and average being extremely different numbers in all instances other than credit card limit. This indicates a heavy left skew in the data, with few extremely high values. It is also quite strange that there are negative bill amounts, though it could simply represent instances where the person paid a greater amount than the credit owed. 
+  
+  For categorical variables, it seems that defaults only occurred for slightly more than 20% of the sample. In the other categorical variables, we see some values of 0. This is strange as there were no specified description for 0 in these variables. It seems that this can only mean that the data is missing in this instance.
+  
+# Test Results
+
+```{r test}
+load("low_complexity_res.Rda")
+load("top_res.Rda")
+
+
+
+low_complexity_list <- list()
+
+low_complexity_list[['1']] = roc_auc(credit_test %>% 
+                                       bind_cols(predict(low_complexity_fit, credit_test, type = "prob")),
+                                       truth = default, estimate = .pred_1)
+low_complexity_list[['2']] = mn_log_loss(credit_test %>% 
+                                       bind_cols(predict(low_complexity_fit, credit_test, type = "prob")),
+                                       truth = default, estimate = .pred_1)
+
+
+perf_meas2 <- metric_set(kap,f_meas)
+
+low_complexity_list[['3']] = perf_meas2(credit_test %>% 
+                                       bind_cols(predict(low_complexity_fit, credit_test)),
+                                       truth = default, estimate = .pred_class)
+
+low_complexity_test_res <- bind_rows(low_complexity_list, .id = 'k') %>%
+  select(-k) 
+
+best_model <- low_complexity_res %>% select_best(metric = 'kap')
+
+low_complexity_res %>%
+  collect_metrics() %>% 
+  filter(.config == best_model$.config) %>% 
+  right_join(low_complexity_test_res) %>% 
+  select(.metric, mean, std_err, .estimate) %>%
+  rename('training value' = mean, 'test value' = .estimate) %>% kable(digits = 3)  
+
+credit_test %>% 
+   bind_cols(predict(low_complexity_fit, credit_test)) %>%
+   conf_mat(truth = default, estimate = .pred_class) 
+
+top_list <- list()
+
+top_list[['1']] = roc_auc(credit_test %>% 
+                            bind_cols(predict(top_fit, credit_test, type = "prob")),
+                            truth = default, estimate = .pred_1)
+
+top_list[['2']] = mn_log_loss(credit_test %>% 
+                                       bind_cols(predict(top_fit, credit_test, type = "prob")),
+                                       truth = default, estimate = .pred_1)
+
+top_list[['3']] = perf_meas2(credit_test %>% 
+                                       bind_cols(predict(top_fit, credit_test)),
+                                       truth = default, estimate = .pred_class)
+
+top_test_res <- bind_rows(top_list, .id = 'k') %>%
+  select(-k) 
+
+best_model <- top_res %>% select_best(metric = 'kap')
+
+top_res %>%
+  collect_metrics() %>% 
+  filter(.config == best_model$.config) %>% 
+  right_join(top_test_res) %>% 
+  select(.metric, mean, std_err, .estimate) %>%
+  rename('training value' = mean, 'test value' = .estimate) %>% kable(digits = 3)  
+
+credit_test %>% 
+   bind_cols(predict(top_fit, credit_test)) %>%
+   conf_mat(truth = default, estimate = .pred_class) 
+```
+
+# Conclusion
+
+  In terms of kappa, the test results are not much different than in the training data, with the logistic regression model even improving. Based only on these results, I would recommend using the top-performing model. However, when looking at the other metrics such as ROC AUC and Log Loss, it seems that there are some problems in the models. 
+  
+  A perfect model is said to have a Log Loss of 0, but the value almost doubled when used on the testing data. As log loss calculates the predicted probability of default as e^(-value), the probability of default being predicted as such is currently 37.5%. ROC AUC is typically a value between 0.5 and 1, with 1 representing a perfect model, but it is below 0.5, meaning some meaningful information is being applied incorrectly and doing the opposite of what the model predicts. 
+  Since I do not know what could have caused this to happen between training and test data, I have no idea how to fix my model to return a ROC AUC above 0.5. By looking at the confusion matrix and f-measure, we can still see that a majority of the predictions are correct, with most non-defaults being predicted as such and around two thirds of default predictions are correct. This is probably due to the fact that predicting non-defaults is much easier and they are much more numerous.  
+  
+  As it currently stands, the model does not predict enough defaults, with the total number of predicted defaults being much lower than the actual number of defaults. The model is much weaker in terms of detecting false positives and negatives, with a false positive rate of around one third and false negatives greater than the true negatives predicted. By dividing the number of true negatives by the total number of defaults, we get 39%, a similar number to the predicted probability obtained from the ROC AUC. Since the number of false negatives is almost twice as large as the number of true negatives, I cannot say that this model is very successful at predicting defaults. 
+  
+  
+  
+  

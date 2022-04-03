@@ -1,0 +1,306 @@
+---
+title: "Assignment 2"
+author: "Derek Shat"
+date: "10/6/2021"
+output: 
+  html_document:
+    theme: "darkly"
+    toc: true
+    toc_float:  
+      collapsed: false
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+The data set consists of sales of a product in 200 different markets along with advertising budgets in TV, radio, and newspaper. The objective is to create a predictive model that would find the optimal combination of TV, radio, and newspaper budgets that would result in the highest sales. 
+
+In order to create this model, a linear regression and a k-NN (nearest neighbours) model will be used. 49% of the data set will be allocated to training the models and 21% will be allocated to validating the models to find which model is fits best; this model will be tested on the remaining 30%, the test set. 
+
+After training linear regression and k-NN models on the training set and validating them with the validation set, it becomes clear that the ideal k-NN model is superior to the linear model in predicting the test set. 
+
+```{r library_setup, message=FALSE}
+library(tidyverse) #loading libraries 
+library(tidymodels)
+library(knitr)
+library(GGally)
+```
+
+## Exploratory data analysis
+Here is a scatter plot matrix showing the correlation of the variables have with each other in the data set. 
+
+```{r scatter_plot_matrix}
+ad_dt <- read_csv('Advertising.csv') %>% select(-...1)
+ad_dt %>% ggpairs()
+```
+
+All three advertising methods seem to correlate somewhat with sales, some better than others. TV has a strong correlation with sales at 78.2%, radio is moderate at 57.6%, and newspaper is weak at 22.8%. Strangely, there seems to be a weak correlation between newspaper and radio at 35.4%, but for the sake of sales this is unimportant.
+
+## Splitting our Data
+The data will now be split according to earlier (49% training, 21% validation, 30% testing). It is important to split training and testing data to see how well models trained in the training set will predict data that they have not been tested on. To avoid the model overfitting on the training data and possibly being a poor predictor of the test data, the models are tested on validation set first to get an idea of how well the model would perform on the test set.
+
+
+```{r split}
+set.seed(123)
+ad_dt_split <- initial_split(ad_dt,prop = 0.7,strata=sales)
+other_dt <- training(ad_dt_split)
+test_dt <- testing(ad_dt_split)
+set.seed(456)
+other_dt_split <- initial_split(other_dt,prop=0.7,strata=sales)
+train_dt <- training(other_dt_split)
+val_dt <- testing(other_dt_split)
+```
+
+The data is split by using stratified sampling based on sales and the proportion of training to testing is 70-30 using the prop=0.7 argument of the initial_split() function. Stratified sampling here splits the sales data into equal sections and takes samples from each section with the strata=sales argument of the initial_split() function. This ensures that the sets are more likely to be balanced in terms of sales and include values from all over the data (rather than possibly having one of the sets full of only low or only high sales). 
+
+## Performance Metric
+The performance measure to optimize the learning process of the model will be mean absolute error. By taking the average of absolute value of the distance between the predicted and actual value, it can be determined how much the prediction deviates from the actual result on average. Since k-NN models typically have high variance, this metric is especially useful. Although linear models are typically low in variance, their sensitivity to bias still makes the mean absolute error useful for determining the accuracy of the model.
+
+
+# k-Nearest Neighbours
+
+## Model creation and training 
+Creating 3 k-NN models, one based on 4 neighbours, one for 8 neighbours, and one for 12 neighbours. Their performance will be compared on the training and validation sets and one will be chosen for use on the test set.
+
+```{r model_creation_and_training}
+knn_mod_4 <- 
+  nearest_neighbor(neighbors = 4) %>%
+  set_engine("kknn") %>%
+  set_mode("regression")
+
+knn_mod_8 <- 
+  nearest_neighbor(neighbors = 8) %>%
+  set_engine("kknn") %>%
+  set_mode("regression")
+
+knn_mod_12 <- 
+  nearest_neighbor(neighbors = 12) %>%
+  set_engine("kknn") %>%
+  set_mode("regression")
+
+knn_4_fit <- 
+  knn_mod_4 %>%
+  fit(sales ~ TV + radio + newspaper, data = train_dt)
+
+
+knn_8_fit <- 
+  knn_mod_8 %>%
+  fit(sales ~ TV + radio + newspaper, data = train_dt)
+
+
+knn_12_fit <- 
+  knn_mod_12 %>%
+  fit(sales ~ TV + radio + newspaper, data = train_dt)
+
+train_knn_dt <- train_dt %>%
+  bind_cols(predict(knn_4_fit, new_data=train_dt),
+            predict(knn_8_fit, new_data=train_dt),
+            predict(knn_12_fit, new_data=train_dt)) %>%
+  rename(y_knn_4 = .pred...5,
+         y_knn_8 = .pred...6,
+         y_knn_12 = .pred...7)
+```
+
+## Training Results
+```{r knn_list}
+knn_train_list <- list()
+
+knn_train_list[['4']] <- metrics(data = train_knn_dt, truth = sales, estimate = y_knn_4)
+knn_train_list[['8']] <- metrics(data = train_knn_dt, truth = sales, estimate = y_knn_8)
+knn_train_list[['12']] <- metrics(data = train_knn_dt, truth = sales, estimate = y_knn_12)
+
+knn_train_metrics <- bind_rows(knn_train_list, .id = 'k') %>%
+  mutate(error_type = 'training')
+
+knn_train_metrics %>%
+  pivot_wider(names_from = '.metric', 
+              values_from = '.estimate') %>%
+  kable(digits = 4, 
+        caption = 'k-NN Training Error')
+```
+
+The 4-neighbour model fares best in all three metrics, while the 12-neighbour model does the worst in all three.
+
+## Validation Results
+```{r validation}
+val_knn_dt <- val_dt %>%
+  bind_cols(predict(knn_4_fit, new_data=val_dt),
+            predict(knn_8_fit, new_data=val_dt),
+            predict(knn_12_fit, new_data=val_dt)) %>%
+  rename(y_knn_4 = .pred...5,
+         y_knn_8 = .pred...6,
+         y_knn_12 = .pred...7)
+
+knn_val_list <- list()
+
+knn_val_list[['4']] <- metrics(data = val_knn_dt, truth = sales, estimate = y_knn_4)
+knn_val_list[['8']] <- metrics(data = val_knn_dt, truth = sales, estimate = y_knn_8)
+knn_val_list[['12']] <- metrics(data = val_knn_dt, truth = sales, estimate = y_knn_12)
+
+knn_val_metrics <- bind_rows(knn_val_list, .id = 'k') %>%
+  mutate(error_type = 'validation')
+
+knn_val_metrics %>%
+  pivot_wider(names_from = '.metric', 
+              values_from = '.estimate') %>%
+  kable(digits = 4, 
+        caption = 'k-NN Validation Error')
+```
+
+The 8-neighbour model fares best in all three metrics, while the 4 and 12-neighbour models do comparatively worse. 
+
+## Metrics tibble plot
+```{r metrics_tibble}
+knn_metrics <- bind_rows(knn_val_metrics,knn_train_metrics) %>%
+  mutate(neighbours = parse_number(k))
+
+knn_metrics %>% 
+  ggplot(aes(x=neighbours, y = .estimate, color = error_type)) +
+  geom_point() +
+  geom_line() + 
+  facet_wrap(~.metric,nrow=2, scales = "free_y") +
+  labs(title = 'k-NN Models', 
+       subtitle = 'Perfomance tuning', 
+       x = 'Neighbours (k)', y = 'Estimate') +
+  theme_minimal()
+
+```
+
+From the looks of the graph, the 4-neighbour model fits the training data best for all three metrics, the 8-neighbour model is the one that best fits the validation data. The 8-neighbour model will be selected for the testing set since it fits the validation set the best, which is the set that the models did not have access to train on before.
+
+# Linear regression
+
+## Model creation, training and metrics
+```{r lm_training}
+lm_mod <-
+  linear_reg() %>%
+  set_engine("lm") %>%
+  set_mode("regression")
+
+lm_fit <- 
+  lm_mod %>%
+  fit(sales ~ TV + radio + newspaper, data = train_dt)
+tidy(lm_fit) %>% 
+  kable(digits=4)
+
+lm_fit_2 <- 
+  lm_mod %>%
+  fit(sales ~ TV + radio, data = train_dt)
+tidy(lm_fit_2)%>% 
+  kable(digits=4)
+
+train_lm_dt <- train_dt %>%
+  bind_cols(predict(lm_fit, new_data=train_dt),
+            predict(lm_fit_2, new_data=train_dt)) %>%
+  rename('3-variable' = .pred...5,
+         '2-variable' = .pred...6)
+```
+In both tables, all estimators seem to be statistically significant according to the p-value, outside of the newspaper. In terms of standard error, the only value that has a relatively high error is the intercept.
+
+## Training Results
+```{r lm_training_2}
+lm_train_list <- list()
+
+lm_train_list[['3-variable']] <- metrics(data = train_lm_dt, truth = sales, estimate = '3-variable')
+lm_train_list[['2-variable']] <- metrics(data = train_lm_dt, truth = sales, estimate = '2-variable')
+
+lm_train_metrics <- bind_rows(lm_train_list, .id = 'k') %>%
+  mutate(error_type = 'training')
+
+lm_train_metrics %>%
+  pivot_wider(names_from = '.metric', 
+              values_from = '.estimate') %>%
+  kable(digits = 4, 
+        caption = 'Linear regression training results')
+```
+
+The 2-variable model seems to fit the training data better in all three metrics, although not by a large amount more than the 3-variable model.
+
+## Validation Results
+```{r lm_validation}
+val_lm_dt <- val_dt %>%
+  bind_cols(predict(lm_fit, new_data=val_dt),
+            predict(lm_fit_2, new_data=val_dt)) %>%
+  rename('3-variable' = .pred...5,
+         '2-variable' = .pred...6)
+
+lm_val_list <- list()
+
+lm_val_list[['3-variable']] <- metrics(data = val_lm_dt, truth = sales, estimate = '3-variable')
+lm_val_list[['2-variable']] <- metrics(data = val_lm_dt, truth = sales, estimate = '2-variable')
+
+lm_val_metrics <- bind_rows(lm_val_list, .id = 'k') %>%
+  mutate(error_type = 'validation')
+
+lm_val_metrics %>%
+  pivot_wider(names_from = '.metric', 
+              values_from = '.estimate') %>%
+  kable(digits = 4, 
+        caption = 'Linear regression validation results')
+```
+
+The 3-variable model seems to fit the validation data better in all three metrics, more than the 2-variable model outperformed the 3-variable in the training set. For the same reason as before, the 3-variable model will be chosen for the testing data.
+
+# Model Selection and Testing
+## 8 neighbours k-NN test
+```{r knn_testing}
+knn_8_fit <- 
+  knn_mod_8 %>%
+  fit(sales ~ TV + radio + newspaper, data = other_dt)
+
+test_knn_dt <- test_dt %>%
+  bind_cols(predict(knn_8_fit, new_data=test_dt)) 
+
+test_knn_metrics <- metrics(data = test_knn_dt, truth = sales, estimate = .pred)
+
+test_knn_metrics %>% 
+  kable(digits=4,
+        caption = "Test Results, k-NN using 8 neighbours")
+```
+
+## 3-variable Linear Regression test 
+```{r lm_testing}
+lm_fit <- 
+  lm_mod %>%
+  fit(sales ~ TV + radio + newspaper, data = other_dt)
+
+test_lm_dt <- test_dt %>% 
+  bind_cols(predict(lm_fit, new_data=test_dt)) 
+
+test_lm_metrics <- metrics(data = test_lm_dt, truth = sales, estimate = .pred)
+
+test_lm_metrics %>% 
+  kable(digits=4,
+        caption = "Test Results, 3-variable Linear regression")
+
+```
+# Conclusion
+Since the k-NN model outperformed the linear model in every metric, it is the final recommendation. The recommendation of which model to use would change if the linear regression had a better performance in terms of mean absolute error.
+
+```{r metric_comparison, echo=FALSE}
+knn_train_metrics %>%
+  filter(k==8) %>% 
+  pivot_wider(names_from = '.metric', 
+              values_from = '.estimate') %>%
+  kable(digits = 4, 
+        caption = 'k-NN Training Error')
+
+knn_val_metrics %>%
+  filter(k==8) %>% 
+  pivot_wider(names_from = '.metric', 
+              values_from = '.estimate') %>%
+  kable(digits = 4, 
+        caption = 'k-NN Validation Error')
+
+test_knn_metrics %>% 
+  kable(digits=4,
+        caption = "Test Results, k-NN using 8 neighbours")
+```
+By comparing the sets, it seems that the model performed the worst in the test set. The results between the sets is mostly the same for training and validation sets, but it seems that the training set was most optimistic in terms of mean absolute error. 
+
+A validation set is essential because of the possibility of the model overfitting the training data, which would likely cause poor prediction of the test set. As such, a validation set is made to test the model on the data the model currently does not know. If the validation set error begins to rise, then training would have to be halted and different models would have to be considered. 
+
+The drawback of using a single validation set is that it is only one set that the training set is being tested on before using the model(s) on the testing set. This can be akin to relying on a single survey for election prediction results, where a single survey could predict a  completely different result than others. To overcome this drawback, the models can be validated on more sets to test their effectiveness in prediction in more unknown data before moving on to the test set. The result should be a model that can predict the test set better than a model that was only validated once. 
+
+

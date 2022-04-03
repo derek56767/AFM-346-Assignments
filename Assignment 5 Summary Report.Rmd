@@ -1,0 +1,323 @@
+---
+title: "Assignment 5 Summary Report"
+author: "Derek Shat"
+date: "12/1/2021"
+output: 
+  html_document:
+    theme: "darkly"
+    toc: true
+    toc_float:  
+      collapsed: false
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+```{r library_setup, message=FALSE}
+library(tidyverse) 
+library(tidymodels)
+library(knitr)
+library(GGally)
+library(doParallel)
+library(knitr)
+library(scales)
+library(baguette)
+library(tictoc)
+library(ISLR)
+data(Smarket)
+```
+# Introduction
+
+## Problem statement
+
+The task is to try to forecast if the S&P500 will increase or decrease given a history of the last five days' returns. This is done with the Smarket dataset in R. This dataset shows daily data about the S&P 500 stock index between 2001 and 2005. The variables in the data named Lag1 to Lag5 represent the percentage return for the past N days, where N is the number after 'Lag', so Lag5 represents the percentage return for the past 5 days. The Volume variable represents the number of daily shares traded in billions, and direction represents a positive or negative return for the market for the day. 4 models will be used to try to predict this: boosting, random forest, support vector machines, and neural nets.
+
+## Model assessment
+
+Since I am to predict if the direction in the dataset will be up or down, this is a problem that is solved using classification. As such, classification metrics must be used to assess the performance of the models that will be used to predict the return of the market. The metric of choice is kappa, which determines the accuracy of the prediction and adjusts it by the chance that the result would have been classified correctly by chance.
+
+In order to train and then test the results, cross-validation was used. The training and testing data were split by a proportion of 70-30, and stratified by direction to ensure that the same proportion of each direction was in both training in testing sets.
+
+
+## Exploratory Data Analysis
+
+The data will be illustrated with plot pairs.
+```{r EDA, message = FALSE, fig.width=12, fig.height=8}
+market_dt <- Smarket %>%
+  as_tibble() %>%
+  select(-Today)
+
+ggpairs(market_dt, 
+        lower =  list(continuous = wrap("smooth_loess",
+                                        color='skyblue'), 
+                      combo = "facethist", 
+                      discrete = "facetbar", 
+                      na = "na"),
+        upper = list(continuous = wrap("cor", size=4), 
+                      combo = "facethist", 
+                      discrete = "facetbar", 
+                      na = "na")) +
+  theme_minimal() + 
+  labs(title = 'Exploratory Data Analysis',
+       subtitle = '2001-2005 S&P 500 data')
+
+```
+
+There are no significant correlations between any variables other than between year and volume, which will not be relevant for this analysis.
+
+## Highlights of Conclusions
+None of the models do a good job at predicting the direction the stock market will take. The models are barely an improvement over using a coin toss to determine the direction. The best model is only better by around 5.5%, but only if you interpret the result as the opposite of the direction outputted.
+
+# Model Validation Results and Testing
+
+I have decided that I will test all of the models in case the best performing training model does poorly on the test as a result of overfitting or other factors.
+```{r data_splitting}
+market_dt <- Smarket %>%
+  as_tibble() %>%
+  select(-Today)
+
+set.seed(123)
+market_split <- initial_split(market_dt, prop = 0.7, strata = Direction)
+market_train <- training(market_split)
+market_test <- testing(market_split)
+
+```
+
+For all models, the enhanced recipe performed better than the base recipe in the training. 
+
+## Boosting
+```{r boosting}
+load("boost_res.rda")
+
+enhanced_boost_wf3
+
+best_model <- enhanced_boost_res3 %>% select_best(metric = 'kap')
+
+enhanced_boost_res3 %>% collect_metrics() %>% filter(.config == best_model$.config, .metric != "mn_log_loss")%>% kable(digits = 3)
+
+enhanced_boost_res3 %>% 
+  collect_metrics() %>% 
+  filter(.metric == 'kap') %>% 
+  ggplot(aes(x = mtry, y = mean, col = min_n))+
+    geom_point() +
+    geom_errorbar(aes(ymin = mean - std_err, ymax = mean + std_err)) +  
+  facet_grid(~.metric, scales = 'free')
+
+enhanced_boost_res3 %>% 
+  collect_metrics() %>% 
+  filter(.metric == 'kap') %>% 
+  ggplot(aes(x = trees, y = mean, col = learn_rate))+
+    geom_point() +
+    geom_errorbar(aes(ymin = mean - std_err, ymax = mean + std_err)) +  
+  facet_grid(~.metric, scales = 'free')
+
+```
+
+Compared to the base recipe which only removes variables containing a single value, the enhanced recipe for this model included steps for normalizing and basis splines. Although tree depth was set at 1, 5 other hyperparameters were tested. With the best model yielding a kappa of 10.5%, this was the best performing model out of all models. 
+
+```{r boost_test}
+perf_list <- list()
+
+perf_list[['1']] <- roc_auc(market_test %>% 
+                              bind_cols(predict(boost_fit, market_test,type = 'prob')),
+                              truth = Direction, estimate = .pred_Up)
+
+perf_meas2 <- metric_set(accuracy,kap)
+
+perf_list[['2']] <- perf_meas2(market_test %>% 
+                              bind_cols(predict(boost_fit, market_test)),
+                              truth = Direction, estimate = .pred_class)
+
+test_results <- bind_rows(perf_list, .id = 'k') %>%
+  select(-k) 
+
+market_test %>% 
+   bind_cols(predict(boost_fit, market_test)) %>%
+   conf_mat(truth = Direction, estimate = .pred_class) 
+
+enhanced_boost_res3 %>%
+  collect_metrics() %>% 
+  filter(.config == best_model$.config) %>% 
+  right_join(test_results) %>% 
+  select(.metric, mean, std_err, .estimate) %>%
+  rename('training value' = mean, 'test value' = .estimate) %>% kable(digits = 3)  
+
+```
+
+Although the kappa during testing at 10.6%, the testing kappa ended up at 0.3%. This is an extremely poor result compared to the training, even in the other metrics. The model is essentially using a coin toss to determine direction.
+
+## Random Forest
+```{r random_forest}
+load("rf_res.rda")
+
+enhanced_rf_wf2
+
+best_model <- enhanced_rf_res2 %>% select_best(metric = 'kap')
+
+enhanced_rf_res2 %>% collect_metrics() %>% filter(.config == best_model$.config, .metric == c("accuracy","kap","roc_auc"))%>% kable(digits = 3)
+
+enhanced_rf_res2 %>% 
+  collect_metrics() %>% 
+  filter(.metric == 'kap') %>% 
+  ggplot(aes(x = mtry, y = mean, col = min_n))+
+    geom_point() +
+    geom_errorbar(aes(ymin = mean - std_err, ymax = mean + std_err)) +  
+  facet_grid(~.metric, scales = 'free')
+
+enhanced_rf_res2 %>% 
+  collect_metrics() %>% 
+  filter(.metric == 'kap') %>% 
+  ggplot(aes(x = trees, y = mean))+
+    geom_point() +
+    geom_errorbar(aes(ymin = mean - std_err, ymax = mean + std_err)) +  
+  facet_grid(~.metric, scales = 'free')
+```
+
+The base and enhanced recipes for this model are the same as in boosting. Three hyperparameters (mtry, trees and min_n) were tested this time. The best model only yielded a kappa of 3.3%, which is not much better than using a coin toss to determine direction.
+
+```{r rf_test}
+perf_list[['1']] <- roc_auc(market_test %>% 
+                              bind_cols(predict(rf_fit, market_test,type = 'prob')),
+                              truth = Direction, estimate = .pred_Up)
+
+perf_meas2 <- metric_set(accuracy,kap)
+
+perf_list[['2']] <- perf_meas2(market_test %>% 
+                              bind_cols(predict(rf_fit, market_test)),
+                              truth = Direction, estimate = .pred_class)
+
+test_results <- bind_rows(perf_list, .id = 'k') %>%
+  select(-k) 
+
+market_test %>% 
+   bind_cols(predict(rf_fit, market_test)) %>%
+   conf_mat(truth = Direction, estimate = .pred_class) 
+
+enhanced_rf_res2 %>%
+  collect_metrics() %>% 
+  filter(.config == best_model$.config) %>% 
+  right_join(test_results) %>% 
+  select(.metric, mean, std_err, .estimate) %>%
+  rename('training value' = mean, 'test value' = .estimate) %>% kable(digits = 3)  
+```
+Although kappa remained the same, the other metrics fell when using the test data. Although it returns the highest value for kappa in the test, it is still not very good at predicting direction.
+
+## Support Vector Machines (SVM)
+```{r svm}
+load("svm_res.rda")
+
+enhanced_rbf_wf
+
+best_model <- enhanced_rbf_res2 %>% select_best(metric = 'kap')
+
+enhanced_rbf_res2 %>% collect_metrics() %>% filter(.config == best_model$.config, .metric == c("accuracy","kap","roc_auc"))%>% kable(digits = 3)
+
+enhanced_rbf_res2 %>% 
+  collect_metrics() %>% 
+  filter(.metric == 'kap') %>% 
+  ggplot(aes(x = cost, y = mean, col = rbf_sigma))+
+    geom_point() +
+    geom_errorbar(aes(ymin = mean - std_err, ymax = mean + std_err)) +  
+  facet_grid(~.metric, scales = 'free')
+
+enhanced_rbf_res2 %>% 
+  collect_metrics() %>% 
+  filter(.metric == 'kap') %>% 
+  ggplot(aes(x = margin, y = mean))+
+    geom_point() +
+    geom_errorbar(aes(ymin = mean - std_err, ymax = mean + std_err)) +  
+  facet_grid(~.metric, scales = 'free')
+```
+
+The base recipe this time not only removed variables with only a single value, but also had a normalization step. The enhanced recipe adds a step for basis splines and a BoxCox transformation. Three hyperparameters (cost, rbf_sigma, and margin) were tested. This model yields the lowest training kappa at 2%.
+
+```{r svm_test}
+perf_list[['1']] <- roc_auc(market_test %>% 
+                              bind_cols(predict(svm_fit, market_test,type = 'prob')),
+                              truth = Direction, estimate = .pred_Up)
+
+perf_meas2 <- metric_set(accuracy,kap)
+
+perf_list[['2']] <- perf_meas2(market_test %>% 
+                              bind_cols(predict(svm_fit, market_test)),
+                              truth = Direction, estimate = .pred_class)
+
+test_results <- bind_rows(perf_list, .id = 'k') %>%
+  select(-k) 
+
+market_test %>% 
+   bind_cols(predict(svm_fit, market_test)) %>%
+   conf_mat(truth = Direction, estimate = .pred_class) 
+
+best_model <- enhanced_rbf_res2 %>% select_best(metric = 'kap')
+
+enhanced_rbf_res2 %>%
+  collect_metrics() %>% 
+  filter(.config == best_model$.config) %>% 
+  right_join(test_results) %>% 
+  select(.metric, mean, std_err, .estimate) %>%
+  rename('training value' = mean, 'test value' = .estimate) %>% kable(digits = 3)  
+
+```
+Strangely enough, the model performance yielded a negative kappa. This means that the model is better at predicting incorrectly than correctly. Considering it is the highest absolute value of kappa out of all of the models tested here, it is the best at predicting as long as the user assumes the returned value is the opposite of the real answer. However, the absolute value is only 5.5%, so it still wouldn't be very accurate for this use.
+
+## Neural Networks
+
+```{r nn}
+load("nn_res.rda")
+
+enhanced_nn_wf3
+
+best_model <- enhanced_nn_res3 %>% select_best(metric = 'kap')
+
+enhanced_nn_res3 %>% collect_metrics() %>% filter(.config == best_model$.config, .metric == c("accuracy","kap","roc_auc"))%>% kable(digits = 3)
+
+enhanced_nn_res3 %>% 
+  collect_metrics() %>% 
+  filter(.metric == 'kap') %>% 
+  ggplot(aes(x = penalty, y = mean))+
+    geom_point() +
+    geom_errorbar(aes(ymin = mean - std_err, ymax = mean + std_err)) +  
+  facet_grid(~.metric, scales = 'free') 
+
+```
+
+The base and enhanced recipes are the same as in SVM. After testing the hidden_units and epochs hyperparameters and optimizing them, only penalty is tuned to find the best model. The best model yields a kappa of 3.2%. 
+
+```{r nn_test}
+perf_list[['1']] <- roc_auc(market_test %>% 
+                              bind_cols(predict(nn_fit, market_test,type = 'prob')),
+                              truth = Direction, estimate = .pred_Up)
+
+perf_meas2 <- metric_set(accuracy,kap)
+
+perf_list[['2']] <- perf_meas2(market_test %>% 
+                              bind_cols(predict(nn_fit, market_test)),
+                              truth = Direction, estimate = .pred_class)
+
+test_results <- bind_rows(perf_list, .id = 'k') %>%
+  select(-k) 
+
+market_test %>% 
+   bind_cols(predict(nn_fit, market_test)) %>%
+   conf_mat(truth = Direction, estimate = .pred_class) 
+
+best_model <- enhanced_nn_res3 %>% select_best(metric = 'kap')
+
+enhanced_nn_res3 %>%
+  collect_metrics() %>% 
+  filter(.config == best_model$.config) %>% 
+  right_join(test_results) %>% 
+  select(.metric, mean, std_err, .estimate) %>%
+  rename('training value' = mean, 'test value' = .estimate) %>% kable(digits = 3)  
+```
+The test causes all metrics to fall, although the change is not as drastic as in other models. 
+
+# Conclusion
+
+In the end, all of the models that were trained were unable to be good predictors of the test data. Although the boosting model seemed to have some potential with a kappa of 10% during training, the testing data proved that it was a fluke and it ended up being the worst predictor instead. 
+
+The best model to use is the SVM model as long as you assume the direction it outputs is the opposite of the actual direction (so "Up" means down and vice versa), although it is still not very good at this either. If it is to be used, the strategy for long exposures would be to buy stocks when the direction outputted is "Up" and sell when it outputs "Down".
+
+As the model is trying to predict the direction that the market will move in, there is no reason it cannot be used for short positions. The strategy for short positions would be the opposite of the one used for long exposures: borrow and sell when the outputted direction is "Down" and buy when it outputs "Up".

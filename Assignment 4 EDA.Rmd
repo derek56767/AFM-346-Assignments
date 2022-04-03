@@ -1,0 +1,72 @@
+---
+title: "Assignment 4 EDA"
+author: "Derek Shat"
+date: "11/17/2021"
+output: 
+  html_document:
+    theme: "darkly"
+    toc: true
+    toc_float:  
+      collapsed: false
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r library_setup, message=FALSE}
+library(tidyverse) 
+library(tidymodels)
+library(knitr)
+library(GGally)
+library(doParallel)
+library(ISLR)
+data(Smarket)
+```
+
+# Data Description
+The dataset shows daily data about the S&P 500 stock index between 2001 and 2005. The variables in the data named Lag1 to Lag5 represent the percentage return for the past N days, where N is the number after 'Lag', so Lag5 represents the percentage return for the past 5 days. The Volume variable represents the number of daily shares traded in billions, and direction represents a positive or negative return for the market for the day.
+
+# Plot Pairs
+```{r EDA, message = FALSE, fig.width=12, fig.height=8}
+market_dt <- Smarket %>%
+  as_tibble() %>%
+  select(-Today)
+
+ggpairs(market_dt, 
+        lower =  list(continuous = wrap("smooth_loess",
+                                        color='skyblue'), 
+                      combo = "facethist", 
+                      discrete = "facetbar", 
+                      na = "na"),
+        upper = list(continuous = wrap("cor", size=4), 
+                      combo = "facethist", 
+                      discrete = "facetbar", 
+                      na = "na")) +
+  theme_minimal() + 
+  labs(title = 'Exploratory Data Analysis',
+       subtitle = '2001-2005 S&P 500 data')
+
+```
+
+There are no significant correlations between any variables other than between year and volume.
+
+# Descriptive Stats
+```{r descriptive_stats}
+market_dt %>%
+  select(-Year, -Direction) %>% 
+  rownames_to_column('id') %>%
+  pivot_longer(-id) %>%
+  group_by(name) %>%
+  summarise(min = min(value), 
+            q25 = quantile(value,0.25),
+            med = median(value),
+            avg = mean(value),
+            q75 = quantile(value, 0.75),
+            max = max(value),
+            IQR = IQR(value),
+            sd = sd(value)) %>%
+  kable(digits=3)
+
+market_dt %>% count(Direction)
+```

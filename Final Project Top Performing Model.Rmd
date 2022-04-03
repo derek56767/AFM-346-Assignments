@@ -1,0 +1,162 @@
+---
+title: "AFM 346 Final Project - Top Performing Model"
+author: "Derek Shat"
+date: "12/15/2021"
+output: 
+  html_document:
+    theme: "darkly"
+    toc: true
+    toc_float:  
+      collapsed: false
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+```{r library_setup, message=FALSE}
+library(tidyverse) 
+library(readxl)
+library(tidymodels)
+library(GGally)
+library(knitr)
+library(doParallel)
+library(tictoc)
+library(janitor)
+```
+
+```{r data_cleanup}
+credit_raw <- read_xls("default of credit card clients.xls", skip = 1)
+
+credit_dt <- credit_raw %>%
+  clean_names() %>%
+        select(default = default_payment_next_month,
+               everything()) %>% 
+  mutate(across(.cols = c('default','sex', 
+                          'education', 'marriage',
+                          matches('pay_[0-9]')), 
+                as_factor))
+
+set.seed(123)
+credit_split <- initial_split(credit_dt, prop = 0.7, strata = default)
+credit_train <- training(credit_split)
+credit_test <- testing(credit_split)
+set.seed(456)
+credit_folds <- credit_train %>%
+  vfold_cv(v = 5, repeats = 5, strata = default)
+
+perf_meas <- metric_set(kap,f_meas,roc_auc,mn_log_loss)
+```
+
+# Top Performing Model
+
+  The top performing model chosen was the single layer neural net. This model was chosen because it is a more complex model and also because neural networks were said to be "the only one that can accurately estimate the real probability of default" in the description of the data set. Neural networks use a hierarchy of models that try to separate defaults from non-defaults that use functions and iteratively changing weights to try to classify the data correctly. 
+  
+  In addition to the preprocessing steps from low-complexity model, there is also a step to create dummy variables representing whether the credit balance is currently positive or negative, as well as a Yeo-Johnson transformation step.
+  
+  The hyperparameters are hidden_units, penalty, and epochs. hidden_units specifies the number of hidden units in the layer, penalty is the same as in logistic regression, and epochs is the number of training iterations.
+  
+  The results are better than in the other two models, with a kappa of around 0.385 when hidden units is 3, penalty is extremely small, and epochs is around 200. However, the amount of time it takes to train the neural net is 5 times as long as the decision tree, and 3 times as long as the logistic regression (when tuning mixture at least, having a set mixture tends to reduce training time drastically to around 1.5 mins). For around a 1.5% to 2% increase in kappa, it does not make much sense to invest this much time. 
+  
+```{r top_model}
+top_recipe <-  
+  recipe(default~., data = credit_train) %>% 
+  step_dummy(sex:pay_6, -age) %>% 
+  step_zv(all_numeric_predictors(), -all_outcomes()) %>%  
+  step_normalize(all_numeric_predictors(), -all_outcomes())%>% 
+  step_mutate(prop_bill1 = pay_amt1/(bill_amt1 + 1),
+              prop_bill2 = pay_amt2/(bill_amt2 + 1),
+              prop_bill3 = pay_amt3/(bill_amt3 + 1),
+              prop_bill4 = pay_amt4/(bill_amt4 + 1),
+              prop_bill5 = pay_amt5/(bill_amt5 + 1),
+              prop_bill6 = pay_amt6/(bill_amt6 + 1),
+              bill_dummy_1 = ifelse(bill_amt1 >= 0, 1, 0),
+              bill_dummy_2 = ifelse(bill_amt2 >= 0, 1, 0),
+              bill_dummy_3 = ifelse(bill_amt3 >= 0, 1, 0),
+              bill_dummy_4 = ifelse(bill_amt4 >= 0, 1, 0),
+              bill_dummy_5 = ifelse(bill_amt5 >= 0, 1, 0),
+              bill_dummy_6 = ifelse(bill_amt6 >= 0, 1, 0)) %>% 
+  step_YeoJohnson(all_numeric_predictors(), -all_outcomes()) %>%  
+  step_corr(bill_amt1:bill_amt6, -all_outcomes()) 
+  
+
+top_mod <-
+  mlp(hidden_units = tune(),
+      penalty = tune(),
+      epochs = tune()) %>% 
+  set_mode('classification') %>% 
+  set_engine('nnet')
+
+nn_grid <- grid_latin_hypercube(hidden_units(range=c(2,4)),
+                                penalty(range=c(-10,-8)),
+                                epochs(range = c(200, 218)), 
+                                size = 10)
+
+top_wf <- 
+  workflow() %>%
+  add_recipe(top_recipe) %>%
+  add_model(top_mod)
+
+all_cores <- parallel::detectCores(logical = FALSE)
+cl <- makePSOCKcluster(all_cores)
+registerDoParallel(cl)
+
+tune_ctrl <- control_resamples(save_pred = TRUE)
+
+tic()
+top_res <-
+  top_wf %>%
+    tune_grid(credit_folds, 
+              grid = nn_grid,
+              metrics = perf_meas, 
+              control = tune_ctrl)
+toc()
+
+stopCluster(cl)
+
+show_best(top_res, metric = "kap") %>% kable(digits = 3)
+
+top_res %>%
+  collect_metrics() %>% 
+  ggplot(aes(x = hidden_units, y = mean)) +
+  geom_point() + 
+  geom_line() +
+  geom_errorbar(
+    aes(ymin = mean - std_err, 
+        ymax = mean + std_err)) +
+  facet_wrap(~.metric, scales = 'free', ncol = 2) + 
+  theme_minimal() 
+top_res %>%
+  collect_metrics() %>% 
+  ggplot(aes(x = epochs, y = mean)) +
+  geom_point() + 
+  geom_line() +
+  geom_errorbar(
+    aes(ymin = mean - std_err, 
+        ymax = mean + std_err)) +
+  facet_wrap(~.metric, scales = 'free', ncol = 2) + 
+  theme_minimal() 
+
+top_res %>%
+  collect_metrics() %>% 
+  ggplot(aes(x = penalty, y = mean)) +
+  geom_point() + 
+  geom_line() +
+  geom_errorbar(
+    aes(ymin = mean - std_err, 
+        ymax = mean + std_err)) +
+  facet_wrap(~.metric, scales = 'free', ncol = 2) + 
+  theme_minimal() 
+
+```
+
+```{r finalize_and_test}
+wf_top_final <- top_wf %>% 
+  finalize_workflow(select_best(top_res, metric = "kap"))
+
+top_fit <- wf_top_final %>% 
+  fit(credit_train)
+
+save(top_fit, top_res, top_wf, file = 'top_res.Rda')
+
+```

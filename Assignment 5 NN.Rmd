@@ -1,0 +1,350 @@
+---
+title: "Assignment 5 NN"
+author: "Derek Shat"
+date: "12/01/2021"
+output: 
+  html_document:
+    theme: "darkly"
+    toc: true
+    toc_float:  
+      collapsed: false
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r library_setup, message=FALSE}
+library(tidyverse) 
+library(tidymodels)
+library(knitr)
+library(doParallel)
+library(knitr)
+library(scales)
+library(baguette)
+library(tictoc)
+library(ISLR)
+data(Smarket)
+```
+
+# First Models
+
+```{r model_training}
+market_dt <- Smarket %>%
+  as_tibble() %>%
+  select(-Today)
+
+market_dt %>% summarize(total_values = sum(!is.na(.)),
+                        missing = sum(is.na(.)))
+# no need to impute for later
+perf_meas <- metric_set(roc_auc,precision, recall, accuracy,kap,mn_log_loss)
+
+set.seed(123)
+market_split <- initial_split(market_dt, prop = 0.7, strata = Direction)
+market_train <- training(market_split)
+market_test <- testing(market_split)
+set.seed(456)
+market_folds <- market_train %>%
+  vfold_cv(v = 5, repeats = 5, strata = Direction)
+
+base_nn_rec <-
+  recipe(Direction ~., data = market_train) %>%
+  update_role(Year, new_role = 'ID') %>% 
+  step_zv(all_numeric_predictors()) %>% 
+  step_normalize(all_numeric_predictors()) 
+
+enhanced_nn_rec <- base_nn_rec %>%  
+  step_bs(all_numeric_predictors()) %>% 
+  step_BoxCox(all_numeric_predictors())
+
+
+nn_mod <-
+  mlp(hidden_units = tune(),
+      penalty = tune(),
+      epochs = tune()) %>% 
+  set_mode('classification') %>% 
+  set_engine('nnet')
+
+nn_grid <- grid_latin_hypercube(hidden_units(range = c(3, 15)), 
+                             penalty(),
+                             epochs(range = c(10, 250)), 
+                             size = 30)
+
+base_nn_wf <- 
+  workflow() %>%
+  add_recipe(base_nn_rec) %>%
+  add_model(nn_mod)
+
+enhanced_nn_wf <-
+  workflow() %>% 
+  add_recipe(enhanced_nn_rec) %>% 
+  add_model(nn_mod)
+```
+
+## Tuning
+
+```{r tune_1}
+all_cores <- parallel::detectCores(logical = FALSE)
+cl <- makePSOCKcluster(all_cores)
+registerDoParallel(cl)
+
+tune_ctrl <- control_resamples(save_pred = TRUE)
+
+tic()
+base_nn_res <-
+  base_nn_wf %>%
+    tune_grid(market_folds, 
+              grid = nn_grid,
+              metrics = perf_meas, 
+              control = tune_ctrl)
+toc()
+
+tic()
+enhanced_nn_res <-
+  enhanced_nn_wf %>%
+    tune_grid(market_folds, 
+              grid = nn_grid,
+              metrics = perf_meas, 
+              control = tune_ctrl)
+toc()
+
+stopCluster(cl)
+```
+## Results
+
+```{r results}
+show_best(base_nn_res,metric = 'kap') %>% kable(digits=3)
+show_best(base_nn_res,metric = 'roc_auc') %>% kable(digits=3)
+show_best(enhanced_nn_res,metric = 'kap') %>% kable(digits=5)
+show_best(enhanced_nn_res,metric = 'roc_auc') %>% kable(digits=3)
+
+enhanced_nn_res %>%
+  collect_metrics() %>%
+  filter(.metric == 'kap') %>% 
+  ggplot(aes(x = hidden_units, y = mean)) +
+  geom_point() + 
+  geom_line() +
+  geom_errorbar(
+    aes(ymin = mean - std_err, 
+        ymax = mean + std_err)) +
+  facet_wrap(~.metric, scales = 'free', ncol = 2) + 
+  theme_minimal() 
+
+enhanced_nn_res %>%
+  collect_metrics() %>%
+  filter(.metric == 'kap') %>% 
+  ggplot(aes(x = penalty, y = mean)) +
+  geom_point() + 
+  geom_line(color = 'grey85') +
+  geom_errorbar(
+    aes(ymin = mean - std_err, 
+        ymax = mean + std_err)) + 
+  facet_wrap(~.metric, scales = 'free', ncol = 2) +
+  theme_minimal() 
+
+enhanced_nn_res %>%
+  collect_metrics() %>%
+  filter(.metric == 'kap') %>% 
+  ggplot(aes(x = epochs , y = mean)) +
+  geom_point() + 
+  geom_line(color = 'grey85') +
+  geom_errorbar(
+    aes(ymin = mean - std_err, 
+        ymax = mean + std_err)) + 
+  facet_wrap(~.metric, scales = 'free', ncol = 2) +
+  theme_minimal() 
+
+
+```
+
+Once again the workflow using the base recipe returns an extremely small kappa. Regardless, I will try to tune the grid for get better results. The next models will show part of the process that allowed me to get to the best results. 
+
+# Second Models 
+
+```{r tune_2}
+nn_mod2 <-
+  mlp(hidden_units = tune(),
+      penalty = tune(),
+      epochs = tune()) %>% 
+  set_mode('classification') %>% 
+  set_engine('nnet')
+
+nn_grid2 <- grid_latin_hypercube(hidden_units(range = c(3, 15)),
+                                penalty(),
+                                epochs(range = c(0, 20)), 
+                                size = 20)
+
+base_nn_wf2 <- 
+  workflow() %>%
+  add_recipe(base_nn_rec) %>%
+  add_model(nn_mod2)
+
+enhanced_nn_wf2 <-
+  workflow() %>% 
+  add_recipe(enhanced_nn_rec) %>% 
+  add_model(nn_mod2)
+
+all_cores <- parallel::detectCores(logical = FALSE)
+cl <- makePSOCKcluster(all_cores)
+registerDoParallel(cl)
+
+tune_ctrl <- control_resamples(save_pred = TRUE)
+
+tic()
+base_nn_res2 <-
+  base_nn_wf2 %>%
+    tune_grid(market_folds, 
+              grid = nn_grid2,
+              metrics = perf_meas, 
+              control = tune_ctrl)
+toc()
+
+tic()
+enhanced_nn_res2 <-
+  enhanced_nn_wf2 %>%
+    tune_grid(market_folds, 
+              grid = nn_grid2,
+              metrics = perf_meas, 
+              control = tune_ctrl)
+toc()
+
+stopCluster(cl)
+```
+
+
+## Results
+
+```{r results_2}
+show_best(base_nn_res2,metric = 'kap') %>% kable(digits=3)
+show_best(base_nn_res2,metric = 'roc_auc') %>% kable(digits=3)
+show_best(enhanced_nn_res2,metric = 'kap') %>% kable(digits=5)
+show_best(enhanced_nn_res2,metric = 'roc_auc') %>% kable(digits=3)
+
+enhanced_nn_res2 %>%
+  collect_metrics() %>%
+  filter(.metric == 'kap') %>% 
+  ggplot(aes(x = hidden_units, y = mean)) +
+  geom_point() + 
+  geom_line() +
+  geom_errorbar(
+    aes(ymin = mean - std_err, 
+        ymax = mean + std_err)) +
+  facet_wrap(~.metric, scales = 'free', ncol = 2) + 
+  theme_minimal() 
+
+enhanced_nn_res2 %>%
+  collect_metrics() %>%
+  filter(.metric == 'kap') %>% 
+  ggplot(aes(x = penalty, y = mean)) +
+  geom_point() + 
+  geom_line(color = 'grey85') +
+  geom_errorbar(
+    aes(ymin = mean - std_err, 
+        ymax = mean + std_err)) + 
+  facet_wrap(~.metric, scales = 'free', ncol = 2) +
+  theme_minimal() 
+
+enhanced_nn_res2 %>%
+  collect_metrics() %>%
+  filter(.metric == 'kap') %>% 
+  ggplot(aes(x = epochs , y = mean)) +
+  geom_point() + 
+  geom_line(color = 'grey85') +
+  geom_errorbar(
+    aes(ymin = mean - std_err, 
+        ymax = mean + std_err)) + 
+  facet_wrap(~.metric, scales = 'free', ncol = 2) +
+  theme_minimal() 
+
+```
+
+Although the best result from the first model had an epoch of 125, putting the range of epoch around that resulted in a lower kappa, so the epoch range is 0 to 20 instead.
+
+# Final Models
+```{r tune_3}
+nn_mod3 <-
+  mlp(hidden_units = 9,
+      penalty = tune(),
+      epochs = 17) %>% 
+  set_mode('classification') %>% 
+  set_engine('nnet')
+
+nn_grid3 <- grid_latin_hypercube(
+  #hidden_units(range = c(8, 9)),
+                                penalty(),
+   #                             epochs(range = c(16, 18)), 
+                                size = 50)
+
+base_nn_wf3 <- 
+  workflow() %>%
+  add_recipe(base_nn_rec) %>%
+  add_model(nn_mod3)
+
+enhanced_nn_wf3 <-
+  workflow() %>% 
+  add_recipe(enhanced_nn_rec) %>% 
+  add_model(nn_mod3)
+
+all_cores <- parallel::detectCores(logical = FALSE)
+cl <- makePSOCKcluster(all_cores)
+registerDoParallel(cl)
+
+tune_ctrl <- control_resamples(save_pred = TRUE)
+
+tic()
+base_nn_res3 <-
+  base_nn_wf3 %>%
+    tune_grid(market_folds, 
+              grid = nn_grid3,
+              metrics = perf_meas, 
+              control = tune_ctrl)
+toc()
+
+tic()
+enhanced_nn_res3 <-
+  enhanced_nn_wf3 %>%
+    tune_grid(market_folds, 
+              grid = nn_grid3,
+              metrics = perf_meas, 
+              control = tune_ctrl)
+toc()
+
+stopCluster(cl)
+```
+
+
+## Results
+
+```{r results_3}
+show_best(base_nn_res3,metric = 'kap') %>% kable(digits=3)
+show_best(base_nn_res3,metric = 'roc_auc') %>% kable(digits=3)
+show_best(enhanced_nn_res3,metric = 'kap') %>% kable(digits=5)
+show_best(enhanced_nn_res3,metric = 'roc_auc') %>% kable(digits=3)
+
+
+enhanced_nn_res3 %>%
+  collect_metrics() %>%
+  filter(.metric == 'kap') %>% 
+  ggplot(aes(x = penalty, y = mean)) +
+  geom_point() + 
+  geom_line(color = 'grey85') +
+  geom_errorbar(
+    aes(ymin = mean - std_err, 
+        ymax = mean + std_err)) + 
+  facet_wrap(~.metric, scales = 'free', ncol = 3) +
+  theme_minimal() 
+```
+
+Similar to SVM, the best NN model does not come close to beating the best boosting model. Having found the best amounts for hidden_units and epoch, there is very little to improve on here.
+
+# Finalize, Train and Save Workflow  
+
+```{r finalize_and_save}
+nn_final <- enhanced_nn_wf3 %>% 
+  finalize_workflow(enhanced_nn_res3 %>% select_best(metric = 'kap'))
+
+nn_fit <- nn_final %>% 
+  fit(market_train)
+
+save(nn_fit, enhanced_nn_res3, enhanced_nn_wf3, file = 'nn_res.Rda')
+```

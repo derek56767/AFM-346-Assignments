@@ -1,0 +1,190 @@
+---
+title: "Assignment 3"
+author: "Derek Shat"
+date: "10/26/2021"
+output: 
+  html_document:
+    theme: "darkly"
+    toc: true
+    toc_float:  
+      collapsed: false
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r library_setup, message=FALSE}
+library(tidyverse) 
+library(tidymodels)
+library(knitr)
+library(GGally)
+library(ISLR)
+```
+
+# EDA
+```{r EDA, message = FALSE}
+data("Default")
+def_dt <- Default %>% 
+  mutate(default = fct_relevel(default,'Yes'))
+def_dt %>% ggpairs()
+
+```
+
+```{r metrics_and_split}
+perf_mx <- metric_set(roc_auc,precision, recall, accuracy)
+set.seed(987)
+def_split <- initial_split(def_dt, prop = 0.7)
+def_train <- training(def_split)
+def_test <- testing(def_split)
+set.seed(654)
+def_folds <- def_train %>% 
+  vfold_cv(v=10, strata=default,repeats = 5)
+```
+Specifying the number of folds simply creates that number of sets that are around the same size. The number of repetitions specified results in that number of folds being repeated, so 10 folds with 5 repetitions results in a total of 50 sets to train the model on.
+
+# k-NN
+
+```{r knn, message = FALSE}
+def_rec <- 
+  recipe(default ~ ., data = def_train)
+
+knn_mod <- 
+  nearest_neighbor(neighbors = tune()) %>%
+  set_mode('classification') %>%
+  set_engine('kknn')
+
+wf_knn <-
+  workflow() %>% 
+  add_recipe(def_rec) %>%
+  add_model(knn_mod)
+
+wf_knn %>% parameters()
+
+param_knn <- crossing(neighbors = 2^seq(1,8,1))
+
+tune_knn <- wf_knn %>% 
+  tune_grid(
+    def_folds, 
+    grid = param_knn, 
+    metrics = perf_mx,
+    control = control_resamples(save_pred=TRUE)
+    )
+
+show_best(tune_knn, metric = 'roc_auc') %>% kable(digits=3)
+
+def_tuned <- tune_knn %>% collect_metrics()
+
+def_tuned %>% 
+  ggplot(aes(x=neighbors, y = mean))+
+  geom_point() + geom_line() +
+  facet_wrap(~.metric, scale = 'free_y') +  
+  labs(title = 'Classification Metrics',
+       subtitle = 'Defaults on Credit Card Debt')
+```
+
+The best performing model by looking at only ROC AUC is the one with 256 neighbours.
+However, the precision value is entirely missing and recall is 0 for 256 neighbours. With a precision that is NaN (not a number), that must mean there was no data selected to begin with. With a recall of 0, no relevant instances have been retrieved. After reaching a peak at 16 neighbours, the accuracy decreases.
+
+```{r knn_conf_matrix}
+conf_mat_resampled(x = tune_knn, 
+                   parameters = select_best(
+                     tune_knn, 
+                     metric = 'roc_auc')) %>% kable()
+
+```
+A confusion matrix shows the number of times the model made a "yes" or "no" prediction, and compares it to the true "yes" or "no" result, resulting in 4 categories. A resampled confusion matrix makes a confusion matrix for each resample and calculates the average values of the 4 categories. The problem with this model is the lack of "yes" predictions, which makes sense considering the precision and recall were calculated to be NaN and 0 respectively.
+
+# Logistic Regression
+
+```{r lr, message = FALSE}
+def_rec2 <- def_rec %>%
+  step_dummy(student) %>%
+  step_normalize(income,balance)
+  
+lr_mod <- 
+  logistic_reg(penalty = tune(), 
+             mixture = 1) %>%
+  set_mode('classification') %>%
+  set_engine('glmnet')
+
+wf_lr <-
+  workflow() %>% 
+  add_recipe(def_rec2) %>%
+  add_model(lr_mod)
+
+wf_lr %>% parameters()
+
+param_lr <- crossing(penalty = seq(0,0.1,0.025))
+
+tune_lr <- wf_lr %>% 
+  tune_grid(
+    def_folds, 
+    grid = param_lr, 
+    metrics = perf_mx,
+    control = control_resamples(save_pred=TRUE)
+    )
+
+show_best(tune_lr, metric = 'roc_auc') %>% kable(digits=3)
+
+def_tuned2 <- tune_lr %>% collect_metrics()
+
+def_tuned2 %>% 
+  ggplot(aes(x=penalty, y = mean))+
+  geom_point() + geom_line() +
+  facet_wrap(~.metric, scale = 'free_y') +  
+  labs(title = 'Classification Metrics',
+       subtitle = 'Defaults on Credit Card Debt')
+
+```
+
+```{r lr_conf_matrix}
+conf_mat_resampled(x = tune_lr, 
+                   parameters = select_best(
+                     tune_lr, 
+                     metric = 'roc_auc')) %>% kable()
+
+```
+This model (0 penalty, 1 mixture) performs better than the previous one in terms of ROC AUC and accuracy. It also makes predictions for "yes", resulting in a recall and precision that actually exist. From a metrics standpoint this model performs better than the 256 neighbor knn model in every way, and the model does not predict only "no", so I believe it will perform better.
+
+# Testing
+
+```{r finalize}
+wf_lr_final <-
+  wf_lr %>%
+  finalize_workflow(select_best(tune_lr,metric='roc_auc'))
+
+lr_fit <- 
+  wf_lr_final %>%
+  fit(def_train)
+
+perf_list <- list()
+
+perf_list[['1']] <- roc_auc(def_test %>% 
+                              bind_cols(predict(lr_fit, def_test,type = 'prob')),
+                              truth = default, estimate = .pred_Yes)
+
+perf_mx2 <- metric_set(precision, recall, accuracy)
+
+perf_list[['2']] <- perf_mx2(def_test %>% 
+                              bind_cols(predict(lr_fit, def_test)),
+                              truth = default, estimate = .pred_class)
+
+test_results <- bind_rows(perf_list, .id = 'k') %>%
+  select(-k) 
+
+def_test %>% 
+   bind_cols(predict(lr_fit, def_test)) %>%
+   conf_mat(truth = default, estimate = .pred_class) 
+
+def_tuned2 %>% 
+  filter(penalty==0) %>%
+  full_join(test_results) %>% 
+  select(.metric, mean, std_err, .estimate) %>%
+  rename('training value' = mean, 'test value' = .estimate) %>% kable(digits = 3)  
+```
+With cross-validation, testing the best model trained on all the training data resulted in very similar results in all metrics. This was expected from the low values of the standard error from the training set. 
+
+I'm not sure what the last question is trying to ask (What type of prediction do you think that the model should be enhanced?) as it does not make grammatical sense, but I will try to answer what I interpret of it. 
+
+To answer "What type of predictor do you think would enhance the model?", I would say that average cost of living in the city that the person is from. A person living in a city with a high cost of living is more likely to default that another living in a city with a lower cost of living, assuming similar income. A dummy variable can be made from this with a value of 1 for when the cost of living in their city exceeds the person's income, and 0 for the when their income exceeds the cost of living. If finding that on a city-by-city basis is too difficult, an alternative could be a variable that simply determines if the person's income exceeds a certain amount of income, such as the country's average yearly income.

@@ -1,0 +1,354 @@
+---
+title: "Assignment 5 SVM"
+author: "Derek Shat"
+date: "12/01/2021"
+output: 
+  html_document:
+    theme: "darkly"
+    toc: true
+    toc_float:  
+      collapsed: false
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r library_setup, message=FALSE}
+library(tidyverse) 
+library(tidymodels)
+library(knitr)
+library(doParallel)
+library(knitr)
+library(scales)
+library(baguette)
+library(tictoc)
+library(ISLR)
+data(Smarket)
+```
+
+# First Models
+
+```{r model_training}
+market_dt <- Smarket %>%
+  as_tibble() %>%
+  select(-Today)
+
+market_dt %>% summarize(total_values = sum(!is.na(.)),
+                        missing = sum(is.na(.)))
+# no need to impute for later
+perf_meas <- metric_set(roc_auc,precision, recall, accuracy,kap,mn_log_loss)
+
+set.seed(123)
+market_split <- initial_split(market_dt, prop = 0.7, strata = Direction)
+market_train <- training(market_split)
+market_test <- testing(market_split)
+set.seed(456)
+market_folds <- market_train %>%
+  vfold_cv(v = 5, repeats = 5, strata = Direction)
+
+base_svm_rec <-
+  recipe(Direction ~., data = market_train) %>%
+  update_role(Year, new_role = 'ID') %>% 
+  step_zv(all_numeric_predictors()) %>% 
+  step_normalize(all_numeric_predictors()) 
+
+enhanced_svm_rec <- base_svm_rec %>%  
+  step_bs(all_numeric_predictors()) %>% 
+  step_BoxCox(all_numeric_predictors())
+
+
+svm_poly_mod <-
+  svm_poly(cost = tune(),
+           margin = tune(),
+           degree = tune(),
+           scale_factor = tune())%>% 
+  set_mode('classification') %>% 
+  set_engine('kernlab')
+
+svm_rbf_mod <-
+  svm_rbf(cost = tune(),
+          rbf_sigma = tune(),
+          margin = tune()) %>% 
+  set_mode('classification') %>% 
+  set_engine('kernlab')
+
+svm_grid <- grid_latin_hypercube(cost(),
+                                 rbf_sigma(),
+                                 svm_margin(),
+                                 size=50)
+  
+base_poly_wf <-
+  workflow() %>%  
+  add_recipe(base_svm_rec) %>%
+  add_model(svm_poly_mod)
+
+enhanced_poly_wf <-
+  workflow() %>% 
+  add_recipe(enhanced_svm_rec) %>% 
+  add_model(svm_poly_mod)
+
+svm_poly_params <- 
+  base_poly_wf %>%
+  parameters()
+
+base_rbf_wf <-
+  workflow() %>%  
+  add_recipe(base_svm_rec) %>%
+  add_model(svm_rbf_mod)
+
+enhanced_rbf_wf <-
+  workflow() %>% 
+  add_recipe(enhanced_svm_rec) %>% 
+  add_model(svm_rbf_mod)
+```
+
+## Tuning
+
+```{r tune_1}
+all_cores <- parallel::detectCores(logical = FALSE)
+cl <- makePSOCKcluster(all_cores)
+registerDoParallel(cl)
+
+bayes_ctrl <- control_bayes(no_improve = 15, save_pred = TRUE, seed = 100)
+tune_ctrl <- control_resamples(save_pred = TRUE)
+
+tic()
+base_poly_res <-
+  base_poly_wf %>%
+    tune_bayes(market_folds, 
+              param_info = svm_poly_params,
+              initial = 20,
+              iter = 20,              
+              metrics = perf_meas, 
+              control = bayes_ctrl)
+toc()
+
+tic()
+enhanced_poly_res <-
+  enhanced_poly_wf %>%
+    tune_bayes(market_folds, 
+              param_info = svm_poly_params,
+              initial = 20,
+              iter = 20,              
+              metrics = perf_meas, 
+              control = bayes_ctrl)
+toc()
+
+
+tic()
+base_rbf_res <-
+  base_rbf_wf %>%
+    tune_grid(market_folds, 
+              grid = svm_grid,
+              metrics = perf_meas, 
+              control = tune_ctrl)
+toc()
+
+tic()
+enhanced_rbf_res <-
+  enhanced_rbf_wf %>%
+    tune_grid(market_folds, 
+              grid = svm_grid,
+              metrics = perf_meas, 
+              control = tune_ctrl)
+toc()
+
+stopCluster(cl)
+```
+## Results
+
+```{r results}
+show_best(base_poly_res,metric = 'kap') %>% kable(digits=3)
+show_best(enhanced_poly_res,metric = 'kap') %>% kable(digits=5)
+show_best(enhanced_poly_res,metric = 'roc_auc') %>% kable(digits=3)
+show_best(base_rbf_res,metric = 'kap') %>% kable(digits=3)
+show_best(enhanced_rbf_res,metric = 'kap') %>% kable(digits=5)
+show_best(enhanced_rbf_res,metric = 'roc_auc') %>% kable(digits=5)
+
+
+enhanced_rbf_res %>%
+  collect_metrics() %>%
+  filter(.metric == 'kap') %>% 
+  ggplot(aes(x = rbf_sigma, y = mean)) +
+  geom_point() + 
+  geom_line() +
+  geom_errorbar(
+    aes(ymin = mean - std_err, 
+        ymax = mean + std_err)) +
+  facet_wrap(~.metric, scales = 'free', ncol = 2) + 
+  theme_minimal() 
+
+enhanced_rbf_res %>%
+  collect_metrics() %>%
+  filter(.metric == 'kap') %>% 
+  ggplot(aes(x = cost, y = mean)) +
+  geom_point() + 
+  geom_line(color = 'grey85') +
+  geom_errorbar(
+    aes(ymin = mean - std_err, 
+        ymax = mean + std_err)) + 
+  facet_wrap(~.metric, scales = 'free', ncol = 2) +
+  theme_minimal() 
+
+enhanced_rbf_res %>%
+  collect_metrics() %>%
+  filter(.metric == 'kap') %>% 
+  ggplot(aes(x =margin , y = mean)) +
+  geom_point() + 
+  geom_line(color = 'grey85') +
+  geom_errorbar(
+    aes(ymin = mean - std_err, 
+        ymax = mean + std_err)) + 
+  facet_wrap(~.metric, scales = 'free', ncol = 2) +
+  theme_minimal() 
+
+
+```
+
+It seems that the workflows using the base recipe do not return a visible kappa. Regardless, I will try to tune the grid and the parameters for the polynomial to get better results. The next models will show the results that were the best that could be found for both polynomial and SVM. 
+
+# Second Models 
+
+```{r tune_2}
+svm_grid2 <- grid_latin_hypercube(cost(range = c(2.2,2.4), trans = NULL),
+                                 rbf_sigma(range=c(0.002,0.0025), trans = NULL),
+                                 svm_margin(range=c(0.17,0.2),trans=NULL),
+                                 size=50)
+
+svm_poly_mod2 <-
+  svm_poly(cost = tune(),
+           margin = tune(),
+           degree = 2,
+           scale_factor = 0.005)%>% 
+  set_mode('classification') %>% 
+  set_engine('kernlab')
+
+enhanced_poly_wf2 <-
+  workflow() %>% 
+  add_recipe(enhanced_svm_rec) %>% 
+  add_model(svm_poly_mod2)
+
+svm_poly_params2 <- 
+  enhanced_poly_wf2 %>%
+  parameters()
+
+all_cores <- parallel::detectCores(logical = FALSE)
+cl <- makePSOCKcluster(all_cores)
+registerDoParallel(cl)
+
+bayes_ctrl <- control_bayes(no_improve = 15, save_pred = TRUE, seed = 100)
+tune_ctrl <- control_resamples(save_pred = TRUE)
+
+
+tic()
+enhanced_poly_res2 <-
+  enhanced_poly_wf2 %>%
+    tune_bayes(market_folds, 
+              param_info = svm_poly_params2,
+              initial = 15,
+              iter = 20,              
+              metrics = perf_meas, 
+              control = bayes_ctrl)
+toc()
+
+tic()
+enhanced_rbf_res2 <-
+  enhanced_rbf_wf %>%
+    tune_grid(market_folds, 
+              grid = svm_grid2,
+              metrics = perf_meas, 
+              control = tune_ctrl)
+toc()
+
+stopCluster(cl)
+```
+Regardless of how much tuning was done, the workflows using the base recipes always yielded a kappa of 0, so they were taken out for the second models to reduce the time needed to train the models.
+
+## Results
+
+```{r results_2}
+show_best(enhanced_poly_res2,metric = 'kap') %>% kable(digits=5)
+show_best(enhanced_poly_res2,metric = 'roc_auc') %>% kable(digits=5)
+show_best(enhanced_rbf_res2,metric = 'kap') %>% kable(digits=5)
+show_best(enhanced_rbf_res2,metric = 'roc_auc') %>% kable(digits=5)
+
+enhanced_poly_res2 %>%
+  collect_metrics() %>%
+  filter(.metric ==  'kap') %>% 
+  ggplot(aes(x = cost, y = mean)) +
+  geom_point() + 
+  geom_line(color = 'grey85') +
+  geom_errorbar(
+    aes(ymin = mean - std_err, 
+        ymax = mean + std_err),
+        color = 'grey35') + 
+  facet_wrap(~.metric, scales = 'free', ncol = 2) +
+  theme_minimal()  
+
+enhanced_poly_res2 %>%
+  collect_metrics() %>%
+  filter(.metric ==  'kap') %>% 
+  ggplot(aes(x = margin, y = mean)) +
+  geom_point() + 
+  geom_line(color = 'grey85') +
+  geom_errorbar(
+    aes(ymin = mean - std_err, 
+        ymax = mean + std_err),
+        color = 'grey35') + 
+  facet_wrap(~.metric, scales = 'free', ncol = 2) +
+  theme_minimal()  
+
+enhanced_rbf_res2 %>%
+  collect_metrics() %>%
+  filter(.metric ==  'kap') %>% 
+  ggplot(aes(x = cost, y = mean)) +
+  geom_point() + 
+  geom_line(color = 'grey85') +
+  geom_errorbar(
+    aes(ymin = mean - std_err, 
+        ymax = mean + std_err),
+        color = 'grey35') + 
+  facet_wrap(~.metric, scales = 'free', ncol = 2) +
+  theme_minimal()  
+
+enhanced_rbf_res2 %>%
+  collect_metrics() %>%
+  filter(.metric == 'kap') %>% 
+  ggplot(aes(x = margin, y = mean)) +
+  geom_point() + 
+  geom_line(color = 'grey85') +
+  geom_errorbar(
+    aes(ymin = mean - std_err, 
+        ymax = mean + std_err),
+        color = 'grey35') + 
+  facet_wrap(~.metric, scales = 'free', ncol = 2) +
+  theme_minimal() 
+
+enhanced_rbf_res2 %>%
+  collect_metrics() %>%
+  filter(.metric == 'kap') %>% 
+  ggplot(aes(x = rbf_sigma, y = mean)) +
+  geom_point() + 
+  geom_line(color = 'grey85') +
+  geom_errorbar(
+    aes(ymin = mean - std_err, 
+        ymax = mean + std_err),
+        color = 'grey35') + 
+  facet_wrap(~.metric, scales = 'free', ncol = 2) +
+  theme_minimal() 
+```
+Although the kappa increased more than in the initial models, it also does not come close to the best boosting model. There does not seem to be much space for further improvement, so I will stop the experiments here. 
+
+
+# Finalize, Train and Save Workflow  
+
+```{r finalize_and_save}
+svm_final <- enhanced_rbf_wf %>% 
+  finalize_workflow(enhanced_rbf_res2 %>% select_best(metric = 'kap'))
+
+svm_fit <- svm_final %>% 
+  fit(market_train)
+
+save(svm_fit, enhanced_rbf_res2, enhanced_rbf_wf, file = 'svm_res.Rda')
+```

@@ -1,0 +1,402 @@
+---
+title: "Assignment 4 Boosting"
+author: "Derek Shat"
+date: "11/17/2021"
+output: 
+  html_document:
+    theme: "darkly"
+    toc: true
+    toc_float:  
+      collapsed: false
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r library_setup, message=FALSE}
+library(tidyverse) 
+library(tidymodels)
+library(knitr)
+library(doParallel)
+library(knitr)
+library(scales)
+library(baguette)
+library(tictoc)
+library(ISLR)
+data(Smarket)
+```
+
+# First models
+
+```{r model_training}
+market_dt <- Smarket %>%
+  as_tibble() %>%
+  select(-Today)
+
+market_dt %>% summarize(total_values = sum(!is.na(.)),
+                        missing = sum(is.na(.)))
+# no need to impute for later
+perf_meas <- metric_set(roc_auc, accuracy,kap,mn_log_loss)
+
+set.seed(123)
+market_split <- initial_split(market_dt, prop = 0.7, strata = Direction)
+market_train <- training(market_split)
+market_test <- testing(market_split)
+set.seed(456)
+market_folds <- market_train %>%
+  vfold_cv(v = 5, repeats = 5, strata = Direction)
+
+base_boost_rec <-
+  recipe(Direction ~., data = market_train) %>%
+  update_role(Year, new_role = 'ID') %>% 
+  step_zv(all_numeric_predictors())
+
+enhanced_boost_rec <- base_boost_rec %>% 
+  step_normalize(all_numeric_predictors()) %>% 
+  step_bs(all_numeric_predictors())
+
+boost_mod <-
+  boost_tree(trees = tune(),
+             learn_rate = tune()) %>% 
+  set_mode('classification') %>% 
+  set_engine('xgboost')
+
+boost_grid <- grid_latin_hypercube(trees(range = c(1,500)),
+                       learn_rate(range = c(-2,-0.5)),
+                       size = 20)
+
+base_boost_wf <-
+  workflow() %>%  
+  add_recipe(base_boost_rec) %>%
+  add_model(boost_mod)
+
+enhanced_boost_wf <-
+  workflow() %>% 
+  add_recipe(enhanced_boost_rec) %>% 
+  add_model(boost_mod)
+```
+## Tuning
+```{r tune1}
+all_cores <- parallel::detectCores(logical = FALSE)
+cl <- makePSOCKcluster(all_cores)
+registerDoParallel(cl)
+
+tune_ctrl <- control_resamples(save_pred = TRUE)
+
+tic()
+base_boost_res <-
+  base_boost_wf %>%
+    tune_grid(market_folds, 
+              grid = boost_grid,
+              metrics = perf_meas, 
+              control = tune_ctrl)
+toc()
+
+tic()
+enhanced_boost_res <-
+  enhanced_boost_wf %>%
+    tune_grid(market_folds,
+              grid = boost_grid,
+              metrics = perf_meas, 
+              control = tune_ctrl)
+toc()
+stopCluster(cl)
+```
+## Results
+```{r results1}
+base_boost_res %>% 
+  collect_metrics() %>% 
+  filter(.metric == c('accuracy','roc_auc')) %>% 
+  ggplot(aes(x = trees, y = mean, col = learn_rate))+
+    geom_point() +
+    geom_errorbar(aes(ymin = mean - std_err, ymax = mean + std_err)) + 
+  facet_grid(~.metric, scales = 'free')
+
+
+
+enhanced_boost_res %>% 
+  collect_metrics() %>% 
+  filter(.metric == c('accuracy','roc_auc')) %>% 
+  ggplot(aes(x = trees, y = mean, col = learn_rate))+
+    geom_point() +
+    geom_errorbar(aes(ymin = mean - std_err, ymax = mean + std_err)) + 
+  facet_grid(~.metric, scales = 'free')
+
+
+base_boost_res %>% 
+  collect_metrics() %>% 
+  filter(.metric == 'mn_log_loss') %>% 
+  ggplot(aes(x = trees, y = mean, col = learn_rate))+
+    geom_point() +
+    geom_errorbar(aes(ymin = mean - std_err, ymax = mean + std_err)) + 
+  facet_grid(~.metric, scales = 'free')
+
+enhanced_boost_res %>% 
+  collect_metrics() %>% 
+  filter(.metric == 'mn_log_loss') %>% 
+  ggplot(aes(x = trees, y = mean, col = learn_rate))+
+    geom_point() +
+    geom_errorbar(aes(ymin = mean - std_err, ymax = mean + std_err)) + 
+  facet_grid(~.metric, scales = 'free')
+
+show_best(base_boost_res,metric = 'kap') %>% kable(digits=3)
+show_best(enhanced_boost_res,metric = 'kap') %>% kable(digits=3)
+show_best(base_boost_res,metric = 'mn_log_loss') %>% kable(digits=3)
+show_best(enhanced_boost_res,metric = 'mn_log_loss') %>% kable(digits=3)
+show_best(base_boost_res,metric = 'accuracy') %>% kable(digits=3)
+show_best(enhanced_boost_res,metric = 'accuracy') %>% kable(digits=3)
+```
+
+From these results, we can see that there does not seem to be much of a correlation between trees and mean. There also seems to be an inverse correlation between learn rate and mean. For the following experiments, trees have been tuned to a smaller range for faster processing, and learn rate will be tuned to smaller amounts. The next experiment shown will introduce tree_depth and stop_iter to the model in an attempt to get better results for the metrics, with a focus on maximizing kappa.
+
+# Second models and tuning
+
+```{r tune2}
+boost_mod2 <-
+  boost_tree(trees = tune(),
+             learn_rate = tune(),
+             tree_depth = tune(),
+             stop_iter = tune()) %>% 
+  set_mode('classification') %>% 
+  set_engine('xgboost')
+
+boost_grid2 <- 
+    grid_latin_hypercube(trees(range = c(1,50)),
+                       learn_rate(range = c(-5,-1.5)),
+                       tree_depth(range=c(1,20)),
+                       stop_iter(range = c(1,20)),
+                       size = 30)
+
+base_boost_wf2 <-
+  workflow() %>%  
+  add_recipe(base_boost_rec) %>%
+  add_model(boost_mod2)
+
+enhanced_boost_wf2 <-
+  workflow() %>% 
+  add_recipe(enhanced_boost_rec) %>% 
+  add_model(boost_mod2)
+
+
+all_cores <- parallel::detectCores(logical = FALSE)
+cl <- makePSOCKcluster(all_cores)
+registerDoParallel(cl)
+
+tune_ctrl <- control_resamples(save_pred = TRUE)
+
+tic()
+base_boost_res2 <-
+  base_boost_wf2 %>%
+    tune_grid(market_folds, 
+              grid = boost_grid2,
+              metrics = perf_meas, 
+              control = tune_ctrl)
+toc()
+
+tic()
+enhanced_boost_res2 <-
+  enhanced_boost_wf2 %>%
+    tune_grid(market_folds,
+              grid = boost_grid2,
+              metrics = perf_meas, 
+              control = tune_ctrl)
+toc()
+stopCluster(cl)
+```
+
+## Results
+
+```{r results2}
+base_boost_res2 %>% 
+  collect_metrics() %>% 
+  filter(.metric == c('accuracy','roc_auc')) %>% 
+  ggplot(aes(x = trees, y = mean, col = tree_depth))+
+    geom_point() +
+    geom_errorbar(aes(ymin = mean - std_err, ymax = mean + std_err)) + 
+  facet_grid(~.metric, scales = 'free')
+
+enhanced_boost_res2 %>% 
+  collect_metrics() %>% 
+  filter(.metric == c('accuracy','roc_auc')) %>% 
+  ggplot(aes(x = trees, y = mean, col = tree_depth))+
+    geom_point() +
+    geom_errorbar(aes(ymin = mean - std_err, ymax = mean + std_err)) + 
+  facet_grid(~.metric, scales = 'free')
+
+base_boost_res2 %>% 
+  collect_metrics() %>% 
+  filter(.metric == 'kap') %>% 
+  ggplot(aes(x = trees, y = mean, col = tree_depth))+
+    geom_point() +
+    geom_errorbar(aes(ymin = mean - std_err, ymax = mean + std_err)) + 
+  facet_grid(~.metric, scales = 'free')
+
+enhanced_boost_res2 %>% 
+  collect_metrics() %>% 
+  filter(.metric == 'kap') %>% 
+  ggplot(aes(x = trees, y = mean, col = tree_depth))+
+    geom_point() +
+    geom_errorbar(aes(ymin = mean - std_err, ymax = mean + std_err)) + 
+  facet_grid(~.metric, scales = 'free')
+
+base_boost_res2 %>% 
+  collect_metrics() %>% 
+  filter(.metric == 'kap') %>% 
+  ggplot(aes(x = trees, y = mean, col = stop_iter))+
+    geom_point() +
+    geom_errorbar(aes(ymin = mean - std_err, ymax = mean + std_err)) + 
+  facet_grid(~.metric, scales = 'free')
+
+enhanced_boost_res2 %>% 
+  collect_metrics() %>% 
+  filter(.metric == 'kap') %>% 
+  ggplot(aes(x = trees, y = mean, col = stop_iter))+
+    geom_point() +
+    geom_errorbar(aes(ymin = mean - std_err, ymax = mean + std_err)) + 
+  facet_grid(~.metric, scales = 'free')
+
+base_boost_res2 %>% 
+  collect_metrics() %>% 
+  filter(.metric == 'mn_log_loss') %>% 
+  ggplot(aes(x = trees, y = mean, col = tree_depth))+
+    geom_point() +
+    geom_errorbar(aes(ymin = mean - std_err, ymax = mean + std_err)) 
+
+enhanced_boost_res2 %>% 
+  collect_metrics() %>% 
+  filter(.metric == 'mn_log_loss') %>% 
+  ggplot(aes(x = trees, y = mean, col = tree_depth))+
+    geom_point() +
+    geom_errorbar(aes(ymin = mean - std_err, ymax = mean + std_err))
+
+show_best(base_boost_res2,metric = 'kap') %>% kable(digits=3)
+show_best(enhanced_boost_res2,metric = 'kap') %>% kable(digits=3)
+show_best(base_boost_res2,metric = 'mn_log_loss') %>% kable(digits=3)
+show_best(enhanced_boost_res2,metric = 'mn_log_loss') %>% kable(digits=3)
+show_best(base_boost_res2,metric = 'accuracy') %>% kable(digits=3)
+show_best(enhanced_boost_res2,metric = 'accuracy') %>% kable(digits=3)
+show_best(base_boost_res2,metric = 'roc_auc') %>% kable(digits=3)
+show_best(enhanced_boost_res2,metric = 'roc_auc') %>% kable(digits=3)
+```
+
+The best results from kappa and log loss show that a tree depth of 1 is better than the next best by a large amount. Judging by the graphs and best results for all measures, a tree count between 20 and 40, as well as a tree depth below 10 seem to yield the best results. 
+
+After several experiments, it is determined that a tree depth of 1 is most consistent at achieving the best results. Next are the final results of experiments,  including mtry and min_n in the model.
+
+# Third models and tuning
+
+```{r tune3}
+boost_mod3 <-
+  boost_tree(trees = tune(),
+             learn_rate = tune(),
+             tree_depth = 1,
+             mtry = tune(),
+             min_n = tune(),
+             stop_iter = tune()) %>%
+  set_mode('classification') %>% 
+  set_engine('xgboost')
+
+boost_grid3 <- 
+  grid_latin_hypercube(trees(range = c(20,40)),
+                       learn_rate(range = c(-6,-1.5)),
+                       finalize(mtry(),market_train),
+                       min_n(range = c(1,35)),
+                       stop_iter(range = c(10,35)),
+                       size = 100)
+
+base_boost_wf3 <-
+  workflow() %>%  
+  add_recipe(base_boost_rec) %>%
+  add_model(boost_mod3)
+
+enhanced_boost_wf3 <-
+  workflow() %>% 
+  add_recipe(enhanced_boost_rec) %>% 
+  add_model(boost_mod3)
+
+all_cores <- parallel::detectCores(logical = FALSE)
+cl <- makePSOCKcluster(all_cores)
+registerDoParallel(cl)
+
+tune_ctrl <- control_resamples(save_pred = TRUE)
+
+tic()
+base_boost_res3 <-
+  base_boost_wf3 %>%
+    tune_grid(market_folds, 
+              grid = boost_grid3,
+              metrics = perf_meas, 
+              control = tune_ctrl)
+toc()
+
+tic()
+enhanced_boost_res3 <-
+  enhanced_boost_wf3 %>%
+    tune_grid(market_folds,
+              grid = boost_grid3,
+              metrics = perf_meas, 
+              control = tune_ctrl)
+toc()
+
+stopCluster(cl)
+```
+
+## Results
+
+```{r results3}
+base_boost_res3 %>% 
+  collect_metrics() %>% 
+  filter(.metric == c('accuracy','roc_auc')) %>% 
+  ggplot(aes(x = trees, y = mean, col = learn_rate))+
+    geom_point() +
+    geom_errorbar(aes(ymin = mean - std_err, ymax = mean + std_err)) + 
+  facet_grid(~mtry, scales = 'free')
+
+enhanced_boost_res3 %>% 
+  collect_metrics() %>% 
+  filter(.metric == c('accuracy','roc_auc')) %>% 
+  ggplot(aes(x = trees, y = mean, col = learn_rate))+
+    geom_point() +
+    geom_errorbar(aes(ymin = mean - std_err, ymax = mean + std_err)) + 
+  facet_grid(~mtry, scales = 'free')
+
+base_boost_res3 %>% 
+  collect_metrics() %>% 
+  filter(.metric == 'kap') %>% 
+  ggplot(aes(x = min_n, y = mean, col = stop_iter))+
+    geom_point() +
+    geom_errorbar(aes(ymin = mean - std_err, ymax = mean + std_err)) +
+  facet_grid(~.metric, scales = 'free')
+
+enhanced_boost_res3 %>% 
+  collect_metrics() %>% 
+  filter(.metric == 'kap') %>% 
+  ggplot(aes(x = mtry, y = mean, col = min_n))+
+    geom_point() +
+    geom_errorbar(aes(ymin = mean - std_err, ymax = mean + std_err)) +  
+  facet_grid(~.metric, scales = 'free')
+
+show_best(base_boost_res3,metric = 'kap') %>% kable(digits=3)
+show_best(enhanced_boost_res3,metric = 'kap') %>% kable(digits=3)
+show_best(base_boost_res3,metric = 'mn_log_loss') %>% kable(digits=3)
+show_best(enhanced_boost_res3,metric = 'mn_log_loss') %>% kable(digits=3)
+show_best(base_boost_res3,metric = 'accuracy') %>% kable(digits=3)
+show_best(enhanced_boost_res3,metric = 'accuracy') %>% kable(digits=3)
+show_best(base_boost_res3,metric = 'roc_auc') %>% kable(digits=3)
+show_best(enhanced_boost_res3,metric = 'roc_auc') %>% kable(digits=3)
+```
+
+We can see from these results that kappa was able to exceed 0.1 as a result of adding all of these parameters. loss_reduction was experimented with, but seemed to result in lower metrics all around so it was scrapped.
+
+# Finalize, Train and Save Workflow  
+
+```{r finalize_and_save}
+boost_final <- enhanced_boost_wf3 %>% 
+  finalize_workflow(enhanced_boost_res3 %>% select_best(metric = 'kap'))
+
+boost_fit <- boost_final %>% 
+  fit(market_train)
+
+save(boost_fit, enhanced_boost_res3, enhanced_boost_wf3, file = 'boost_res.Rda')
+```

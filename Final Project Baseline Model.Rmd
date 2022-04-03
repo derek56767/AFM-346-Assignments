@@ -1,0 +1,171 @@
+---
+title: "AFM 346 Final Project - Baseline Model"
+author: "Derek Shat"
+date: "12/15/2021"
+output: 
+  html_document:
+    theme: "darkly"
+    toc: true
+    toc_float:  
+      collapsed: false
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+```{r library_setup, message=FALSE}
+library(tidyverse) 
+library(readxl)
+library(tidymodels)
+library(GGally)
+library(knitr)
+library(doParallel)
+library(tictoc)
+library(janitor)
+```
+
+```{r data_cleanup}
+credit_raw <- read_xls("default of credit card clients.xls", skip = 1)
+
+credit_dt <- credit_raw %>%
+  clean_names() %>%
+        select(default = default_payment_next_month,
+               everything()) %>% 
+  mutate(across(.cols = c('default','sex', 
+                          'education', 'marriage',
+                          matches('pay_[0-9]')), 
+                as_factor))
+
+set.seed(123)
+credit_split <- initial_split(credit_dt, prop = 0.7, strata = default)
+credit_train <- training(credit_split)
+credit_test <- testing(credit_split)
+set.seed(456)
+credit_folds <- credit_train %>%
+  vfold_cv(v = 5, repeats = 5, strata = default)
+
+perf_meas <- metric_set(kap,f_meas,roc_auc,mn_log_loss)
+```
+
+# Baseline Model
+
+  As a baseline model to compare the recommendations to, I decided to use a decision tree model. This is a simple model that tries to classify the information by recursively subsetting the data to purify it as much as possible and reach a classification. 
+  
+  The hyperparameters used in this model are tree_depth, min_n, and cost_complexity. tree_depth specifies how many times the data is subset. min_n specifies the number of observations must be in a node before subsetting. Cost complexity removes partitions from the subsetted data that does not result in purer data. 
+  
+  Before training the model, the only preprocessing step taken was to turn the categorical variables into dummy variables so that they could be used as predictors for the default.
+  
+  The best results seem to appear when tree depth is set at 6, min_n is set anywhere between 2 and 10, and cost complexity is extremely low and almost 0, for a kappa of around 0.36.
+```{r base_model}
+base_recipe <-  
+  recipe(default~., data = credit_train) %>% 
+  update_role(id, new_role = 'ID') %>%  
+  step_dummy(sex:pay_6,-age)
+
+dt_mod <- 
+  decision_tree(tree_depth = tune(),
+                min_n = tune(),
+                cost_complexity = tune()) %>%
+  set_mode('classification') %>%
+  set_engine('rpart')
+
+base_wf <-
+  workflow() %>% 
+  add_recipe(base_recipe) %>%
+  add_model(dt_mod)
+
+dt_grid <- grid_latin_hypercube(tree_depth(range = c(4,7)),
+                                min_n(range = c(2,10)),
+                                cost_complexity(range = c(-10,-9)),
+                                size = 20)
+
+all_cores <- parallel::detectCores(logical = FALSE)
+cl <- makePSOCKcluster(all_cores)
+registerDoParallel(cl)
+
+tic()
+base_res <- base_wf %>% 
+  tune_grid(
+    credit_folds, 
+    grid = dt_grid, 
+    metrics = perf_meas,
+    control = control_resamples(save_pred=TRUE)
+    )
+toc()
+
+stopCluster(cl)
+
+show_best(base_res, metric = "kap") %>% kable(digits = 3)
+
+base_res %>%
+  collect_metrics() %>% 
+  ggplot(aes(x = tree_depth, y = mean)) +
+  geom_point() + 
+  geom_line() +
+  geom_errorbar(
+    aes(ymin = mean - std_err, 
+        ymax = mean + std_err)) +
+  facet_wrap(~.metric, scales = 'free', ncol = 2) + 
+  theme_minimal() 
+
+base_res %>%
+  collect_metrics() %>% 
+  ggplot(aes(x = min_n, y = mean)) +
+  geom_point() + 
+  geom_line() +
+  geom_errorbar(
+    aes(ymin = mean - std_err, 
+        ymax = mean + std_err)) +
+  facet_wrap(~.metric, scales = 'free', ncol = 2) + 
+  theme_minimal() 
+
+base_res %>%
+  collect_metrics() %>% 
+  ggplot(aes(x = cost_complexity, y = mean)) +
+  geom_point() + 
+  geom_line() +
+  geom_errorbar(
+    aes(ymin = mean - std_err, 
+        ymax = mean + std_err)) +
+  facet_wrap(~.metric, scales = 'free', ncol = 2) + 
+  theme_minimal() 
+```
+
+```{r}
+
+wf_base_final <- base_wf %>% 
+  finalize_workflow(select_best(base_res, metric = "kap"))
+
+base_fit <- wf_base_final %>% 
+  fit(credit_train)
+
+
+base_list <- list()
+
+base_list[['1']] = roc_auc(credit_test %>% 
+                                       bind_cols(predict(base_fit, credit_test, type = "prob")),
+                                       truth = default, estimate = .pred_1)
+base_list[['2']] = mn_log_loss(credit_test %>% 
+                                       bind_cols(predict(base_fit, credit_test, type = "prob")),
+                                       truth = default, estimate = .pred_1)
+
+
+perf_meas2 <- metric_set(kap,f_meas)
+
+base_list[['3']] = perf_meas2(credit_test %>% 
+                                       bind_cols(predict(base_fit, credit_test)),
+                                       truth = default, estimate = .pred_class)
+
+base_test_res <- bind_rows(base_list, .id = 'k') %>%
+  select(-k) 
+
+best_model <- base_res %>% select_best(metric = 'kap')
+
+base_res %>%
+  collect_metrics() %>% 
+  filter(.config == best_model$.config) %>% 
+  right_join(base_test_res) %>% 
+  select(.metric, mean, std_err, .estimate) %>%
+  rename('training value' = mean, 'test value' = .estimate) %>% kable(digits = 3)  
+```

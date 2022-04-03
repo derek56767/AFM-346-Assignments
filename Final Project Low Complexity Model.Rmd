@@ -1,0 +1,141 @@
+---
+title: "AFM 346 Final Project - Low-Complexity Model"
+author: "Derek Shat"
+date: "12/15/2021"
+output: 
+  html_document:
+    theme: "darkly"
+    toc: true
+    toc_float:  
+      collapsed: false
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+```{r library_setup, message=FALSE}
+library(tidyverse) 
+library(readxl)
+library(tidymodels)
+library(GGally)
+library(knitr)
+library(doParallel)
+library(tictoc)
+library(janitor)
+```
+
+```{r data_cleanup}
+credit_raw <- read_xls("default of credit card clients.xls", skip = 1)
+
+credit_dt <- credit_raw %>%
+  clean_names() %>%
+        select(default = default_payment_next_month,
+               everything()) %>% 
+  mutate(across(.cols = c('default','sex', 
+                          'education', 'marriage',
+                          matches('pay_[0-9]')), 
+                as_factor))
+
+set.seed(123)
+credit_split <- initial_split(credit_dt, prop = 0.7, strata = default)
+credit_train <- training(credit_split)
+credit_test <- testing(credit_split)
+set.seed(456)
+credit_folds <- credit_train %>%
+  vfold_cv(v = 5, repeats = 5, strata = default)
+
+perf_meas <- metric_set(kap,f_meas,roc_auc,mn_log_loss)
+```
+
+# Low-Complexity Model
+
+  The low-complexity model chosen was the logistic regression model. This model was chosen becasue it is relatively simple and explainable. It makes the log-odds of a default occurring based on its predictors equal to a line and intercept, which can be solved to calculate a probability value between 0 and 1. 
+  
+  The hyperparameters used are penalty and mixture. Penalty regularizes the data by reducing the coefficients of the variables used to calculate the line and intercept, while mixture specifies what proportion of the penalty is applied by a squared magnitude (ridge regression, when mixture=0) which is the inverse of the proportion applied by an absolute value of magnitude (lasso regression, when mixture=1).   
+  
+  Other than the dummy variable step, some steps to transform the data, such as a step to remove variables with only a single value, a step to normalize the numeric variables, a step to create new variables representing the proportion of the bill paid, and a final step to decorrelate any highly correlated variables. 
+  
+  In the cross-validation results, the best result outperforms the baseline model. It seems that the best results I could get from this model are from a penalty between 0 and 0.000001 and mixture does not seem to matter, with all the top results yielding a kappa around 0.37.
+```{r low_complexity_model}
+low_complexity_recipe <-
+  recipe(default~., data = credit_train) %>% 
+  step_dummy(sex:pay_6, -age) %>% 
+  step_zv(all_numeric_predictors(), -all_outcomes()) %>%  
+  step_normalize(all_numeric_predictors(), -all_outcomes())%>% 
+  step_mutate(prop_bill1 = pay_amt1/(bill_amt1 + 1),
+              prop_bill2 = pay_amt2/(bill_amt2 + 1),
+              prop_bill3 = pay_amt3/(bill_amt3 + 1),
+              prop_bill4 = pay_amt4/(bill_amt4 + 1),
+              prop_bill5 = pay_amt5/(bill_amt5 + 1),
+              prop_bill6 = pay_amt6/(bill_amt6 + 1)) %>%   
+  step_corr(bill_amt1:bill_amt6, -all_outcomes()) 
+
+lr_mod <- 
+  logistic_reg(penalty = tune(), 
+               mixture = tune()) %>%
+  set_mode('classification') %>%
+  set_engine('glmnet')
+
+
+low_complexity_wf <-
+  workflow() %>% 
+  add_recipe(low_complexity_recipe) %>%
+  add_model(lr_mod)
+
+param_lr <- grid_latin_hypercube(penalty(range(-10,-4)),
+                                 mixture(range(0,1)),
+                                 size = 20)
+
+
+all_cores <- parallel::detectCores(logical = FALSE)
+cl <- makePSOCKcluster(all_cores)
+registerDoParallel(cl)
+
+tic()
+low_complexity_res <- low_complexity_wf %>% 
+  tune_grid(
+    credit_folds, 
+    grid = param_lr, 
+    metrics = perf_meas,
+    control = control_resamples(save_pred=TRUE)
+    )
+toc()
+
+stopCluster(cl)
+
+show_best(low_complexity_res, metric = "kap") %>% kable(digits = 3)
+
+low_complexity_res %>%
+  collect_metrics() %>% 
+  ggplot(aes(x = penalty, y = mean)) +
+  geom_point() + 
+  geom_line() +
+  geom_errorbar(
+    aes(ymin = mean - std_err, 
+        ymax = mean + std_err)) +
+  facet_wrap(~.metric, scales = 'free', ncol = 2) + 
+  theme_minimal() 
+low_complexity_res %>%
+  collect_metrics() %>% 
+  ggplot(aes(x = mixture, y = mean)) +
+  geom_point() + 
+  geom_line() +
+  geom_errorbar(
+    aes(ymin = mean - std_err, 
+        ymax = mean + std_err)) +
+  facet_wrap(~.metric, scales = 'free', ncol = 2) + 
+  theme_minimal() 
+
+```
+
+
+```{r finalize_and_test}
+wf_low_complexity_final <- low_complexity_wf %>% 
+  finalize_workflow(select_best(low_complexity_res, metric = "kap"))
+
+low_complexity_fit <- wf_low_complexity_final %>% 
+  fit(credit_train)
+
+save(low_complexity_fit, low_complexity_res, low_complexity_wf, file = 'low_complexity_res.Rda')
+```

@@ -1,0 +1,282 @@
+---
+title: "Assignment 4 Random Forest"
+author: "Derek Shat"
+date: "11/17/2021"
+output: 
+  html_document:
+    theme: "darkly"
+    toc: true
+    toc_float:  
+      collapsed: false
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r library_setup, message=FALSE}
+library(tidyverse) 
+library(tidymodels)
+library(knitr)
+library(doParallel)
+library(knitr)
+library(scales)
+library(baguette)
+library(tictoc)
+library(ISLR)
+data(Smarket)
+```
+
+# First Models
+
+```{r model_training}
+market_dt <- Smarket %>%
+  as_tibble() %>%
+  select(-Today)
+
+market_dt %>% summarize(total_values = sum(!is.na(.)),
+                        missing = sum(is.na(.)))
+# no need to impute for later
+perf_meas <- metric_set(roc_auc,precision, recall, accuracy,kap,mn_log_loss)
+
+set.seed(123)
+market_split <- initial_split(market_dt, prop = 0.7, strata = Direction)
+market_train <- training(market_split)
+market_test <- testing(market_split)
+set.seed(456)
+market_folds <- market_train %>%
+  vfold_cv(v = 5, repeats = 5, strata = Direction)
+
+base_rf_rec <-
+  recipe(Direction ~., data = market_train) %>%
+  update_role(Year, new_role = 'ID') %>% 
+  step_zv(all_numeric_predictors())
+
+enhanced_rf_rec <- base_rf_rec %>% 
+  step_normalize(all_numeric_predictors()) %>% 
+  step_bs(all_numeric_predictors())
+
+rf_mod <-
+  rand_forest(trees = tune(),
+             mtry = tune()) %>% 
+  set_mode('classification') %>% 
+  set_engine('ranger')
+
+
+rf_grid <- 
+  grid_latin_hypercube(trees(range = c(1,500)),
+                       finalize(mtry(),market_train),
+                       size = 50)
+
+base_rf_wf <-
+  workflow() %>%  
+  add_recipe(base_rf_rec) %>%
+  add_model(rf_mod)
+
+enhanced_rf_wf <-
+  workflow() %>% 
+  add_recipe(enhanced_rf_rec) %>% 
+  add_model(rf_mod)
+
+```
+
+## Tuning
+
+```{r tune_1}
+all_cores <- parallel::detectCores(logical = FALSE)
+cl <- makePSOCKcluster(all_cores)
+registerDoParallel(cl)
+
+tune_ctrl <- control_resamples(save_pred = TRUE)
+
+tic()
+base_rf_res <-
+  base_rf_wf %>%
+    tune_grid(market_folds, 
+              grid = rf_grid,
+              metrics = perf_meas, 
+              control = tune_ctrl)
+toc()
+
+tic()
+enhanced_rf_res <-
+  enhanced_rf_wf %>%
+    tune_grid(market_folds,
+              grid = rf_grid,
+              metrics = perf_meas, 
+              control = tune_ctrl)
+toc()
+
+stopCluster(cl)
+```
+## Results
+
+```{r results}
+base_rf_res %>% 
+  collect_metrics() %>% 
+  filter(.metric == c('accuracy','roc_auc')) %>% 
+  ggplot(aes(x = mtry, y = mean, col = trees))+
+    geom_point() +
+    geom_errorbar(aes(ymin = mean - std_err, ymax = mean + std_err)) + 
+  facet_grid(~.metric, scales = 'free')
+
+base_rf_res %>% 
+  collect_metrics() %>% 
+  filter(.metric == 'mn_log_loss') %>% 
+  ggplot(aes(x = mtry, y = mean, col = trees))+
+    geom_point() +
+    geom_errorbar(aes(ymin = mean - std_err, ymax = mean + std_err)) + 
+  facet_grid(~.metric, scales = 'free')
+
+base_rf_res %>% 
+  collect_metrics() %>% 
+  filter(.metric == 'kap') %>% 
+  ggplot(aes(x = mtry, y = mean, col = trees))+
+    geom_point() +
+    geom_errorbar(aes(ymin = mean - std_err, ymax = mean + std_err)) + 
+  facet_grid(~.metric, scales = 'free')
+
+enhanced_rf_res %>% 
+  collect_metrics() %>% 
+  filter(.metric == 'kap') %>% 
+  ggplot(aes(x = mtry, y = mean, col = trees))+
+    geom_point() +
+    geom_errorbar(aes(ymin = mean - std_err, ymax = mean + std_err)) + 
+  facet_grid(~.metric, scales = 'free')
+
+show_best(base_rf_res,metric = 'kap') %>% kable(digits=3)
+show_best(enhanced_rf_res,metric = 'kap') %>% kable(digits=3)
+show_best(base_rf_res,metric = 'accuracy') %>% kable(digits=3)
+show_best(enhanced_rf_res,metric = 'accuracy') %>% kable(digits=3)
+show_best(base_rf_res,metric = 'mn_log_loss') %>% kable(digits=3)
+show_best(enhanced_rf_res,metric = 'mn_log_loss') %>% kable(digits=3)
+```
+
+It seems that a mtry of 1 or 2 gets the best results between all metrics. There does not seem to be much of a correlation between number of trees and better results, so a lower number of trees will be used for the next experiments as it would take less time to do more experiments. min_n will be added to the model and experimented with to see if it has any positive effects. Overall, results are worse than in boosting first tests.
+
+# Second Models 
+
+```{r tune_2}
+rf_mod2 <-
+  rand_forest(trees = tune(),
+             mtry = tune(),
+             min_n = tune()) %>% 
+  set_mode('classification') %>% 
+  set_engine('ranger')
+
+rf_grid2 <- 
+  grid_latin_hypercube(trees(range = c(1,100)),
+                       finalize(mtry(range = c(1,2)),market_train),
+                       min_n(range = c(1,100)),
+                       size = 100)
+
+base_rf_wf2 <-
+  workflow() %>%  
+  add_recipe(base_rf_rec) %>%
+  add_model(rf_mod2)
+
+enhanced_rf_wf2 <-
+  workflow() %>% 
+  add_recipe(enhanced_rf_rec) %>% 
+  add_model(rf_mod2)
+
+all_cores <- parallel::detectCores(logical = FALSE)
+cl <- makePSOCKcluster(all_cores)
+registerDoParallel(cl)
+
+tune_ctrl <- control_resamples(save_pred = TRUE)
+
+tic()
+base_rf_res2 <-
+  base_rf_wf2 %>%
+    tune_grid(market_folds, 
+              grid = rf_grid2,
+              metrics = perf_meas, 
+              control = tune_ctrl)
+toc()
+
+tic()
+enhanced_rf_res2 <-
+  enhanced_rf_wf2 %>%
+    tune_grid(market_folds,
+              grid = rf_grid2,
+              metrics = perf_meas, 
+              control = tune_ctrl)
+toc()
+stopCluster(cl)
+```
+
+## Results
+
+```{r results_2}
+base_rf_res2 %>% 
+  collect_metrics() %>% 
+  filter(.metric == c('accuracy','roc_auc')) %>% 
+  ggplot(aes(x = trees, y = mean, col = min_n))+
+    geom_point() +
+    geom_errorbar(aes(ymin = mean - std_err, ymax = mean + std_err)) + 
+  facet_grid(.metric~mtry, scales = 'free')
+
+enhanced_rf_res2 %>% 
+  collect_metrics() %>% 
+  filter(.metric == c('accuracy','roc_auc')) %>% 
+  ggplot(aes(x = trees, y = mean, col = min_n))+
+    geom_point() +
+    geom_errorbar(aes(ymin = mean - std_err, ymax = mean + std_err)) + 
+  facet_grid(.metric~mtry, scales = 'free')
+
+base_rf_res2 %>% 
+  collect_metrics() %>% 
+  filter(.metric == 'kap') %>% 
+  ggplot(aes(x = min_n, y = mean, col = trees))+
+    geom_point() +
+    geom_errorbar(aes(ymin = mean - std_err, ymax = mean + std_err)) + 
+  facet_grid(.metric~mtry, scales = 'free')
+
+enhanced_rf_res2 %>% 
+  collect_metrics() %>% 
+  filter(.metric == 'kap') %>% 
+  ggplot(aes(x = min_n, y = mean, col = trees))+
+    geom_point() +
+    geom_errorbar(aes(ymin = mean - std_err, ymax = mean + std_err)) + 
+  facet_grid(.metric~mtry, scales = 'free')
+
+base_rf_res2 %>% 
+  collect_metrics() %>% 
+  filter(.metric == 'mn_log_loss') %>% 
+  ggplot(aes(x = trees, y = mean, col = min_n))+
+    geom_point() +
+    geom_errorbar(aes(ymin = mean - std_err, ymax = mean + std_err)) + 
+  facet_grid(.metric~mtry, scales = 'free')
+
+enhanced_rf_res2 %>% 
+  collect_metrics() %>% 
+  filter(.metric == 'mn_log_loss') %>% 
+  ggplot(aes(x = trees, y = mean, col = min_n))+
+    geom_point() +
+    geom_errorbar(aes(ymin = mean - std_err, ymax = mean + std_err))+ 
+  facet_grid(.metric~mtry, scales = 'free')
+
+show_best(base_rf_res2,metric = 'kap') %>% kable(digits=3)
+show_best(enhanced_rf_res2,metric = 'kap') %>% kable(digits=3)
+show_best(base_rf_res2,metric = 'accuracy') %>% kable(digits=3)
+show_best(enhanced_rf_res2,metric = 'accuracy') %>% kable(digits=3)
+show_best(base_rf_res2,metric = 'mn_log_loss') %>% kable(digits=3)
+show_best(enhanced_rf_res2,metric = 'mn_log_loss') %>% kable(digits=3)
+```
+
+Since no specific range of min_n or number of trees seems to be optimal, I will stop the experiments here. The results here are marginally better than the first, but still worse than boosting.
+
+
+# Finalize, Train and Save Workflow  
+
+```{r finalize_and_save}
+rf_final <- enhanced_rf_wf2 %>% 
+  finalize_workflow(enhanced_rf_res2 %>% select_best(metric = 'kap'))
+
+rf_fit <- rf_final %>% 
+  fit(market_train)
+
+save(rf_fit, enhanced_rf_res2, enhanced_rf_wf2, file = 'rf_res.Rda')
+```
+
