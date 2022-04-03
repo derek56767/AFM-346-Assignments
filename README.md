@@ -12,4 +12,4 @@ Assignment 4 is where start training more complex models such as boosting and ra
 
 In Assignment 5, I train SVM and neural networks for the same purpose as in Assignment 4; the models in Assignment 5 are trained to solve the same problem as in Assignment 4.
 
-In my final project for the class, I was to train 3 models - a baseline model, low-complexity model, and high performing model. These models would be compared in their ability to solve the same problem. Long story short, the increased training time was for a marginal payoff.
+In my final project for the class, I was to train 3 models - a baseline model, low-complexity model, and high performing model. These models would be compared in their ability to solve the same problem. Long story short, the increased training time for the supposedly better models was for a marginal payoff.
